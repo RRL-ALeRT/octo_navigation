@@ -7,10 +7,15 @@
   <maintainer email="m.kirsch@fh-aachen.de">max</maintainer>
   <license>Apache-2.0</license>
 
-  <buildtool_depend>ament_cmake</buildtool_depend>
-
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>ament_lint_common</test_depend>
+    <depend>geometry_msgs</depend>
+    <depend>mbf_abstract_nav</depend>
+    <depend>mbf_simple_core</depend>
+    <depend>mbf_octo_core</depend>
+    <depend>mbf_msgs</depend>
+    <depend>nav_msgs</depend>
+    <depend>pluginlib</depend>
+    <depend>rclcpp</depend>
+    <depend>std_srvs</depend>
 
   <export>
     <build_type>ament_cmake</build_type>
