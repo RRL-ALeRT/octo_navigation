@@ -66,7 +66,14 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   header.stamp = node_->now();
   header.frame_id = "map";
 
-  cost = 0;
+  cost = 1.0;
+  geometry_msgs::msg::PoseStamped current_pose = start;
+
+  // Create a new pose that is 1 meter in front of the current pose
+  geometry_msgs::msg::PoseStamped new_pose;
+  new_pose.pose.position.x += 1.0; // Move 1 meter forward along the x-axis
+  new_pose.header = header;
+  plan.push_back(new_pose);
 
   RCLCPP_INFO_STREAM(node_->get_logger(), "Path length: " << cost << "m");
   nav_msgs::msg::Path path_msg;

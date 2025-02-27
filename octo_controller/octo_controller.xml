@@ -1,0 +1,8 @@
+<library path="octo_controller">
+    <class name="octo_controller/OctoController" type="octo_controller::OctoController"
+           base_class_type="mbf_octo_core::OctoController">
+        <description>
+            An octo controller for mbf_octo_nav
+        </description>
+    </class>
+</library>
