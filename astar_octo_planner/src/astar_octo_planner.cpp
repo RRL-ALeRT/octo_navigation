@@ -57,6 +57,34 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   //const auto& mesh = mesh_map_->mesh();
   RCLCPP_INFO(node_->get_logger(), "start astar octo planner.");
 
+  RCLCPP_INFO(node_->get_logger(), "Start position: x = %f, y = %f, z = %f",
+                start.pose.position.x, start.pose.position.y, start.pose.position.z);
+
+
+  auto request = std::make_shared<astar_octo_msgs::srv::PlanPath::Request>();
+  request->start = start;
+  request->goal = goal;
+  while (!plan_path_client_->wait_for_service(std::chrono::seconds(1))) {
+    if (!rclcpp::ok()) {
+      RCLCPP_ERROR(node_->get_logger(), "Interrupted while waiting for the service. Exiting.");
+      return mbf_msgs::action::GetPath::Result::FAILURE;
+    }
+    RCLCPP_INFO(node_->get_logger(), "Service not available, waiting again...");
+  }
+
+    // Send the request and wait for the response
+  auto future = plan_path_client_->async_send_request(request);
+
+  // Wait for the result
+  if (rclcpp::spin_until_future_complete(node_, future) == rclcpp::FutureReturnCode::SUCCESS) {
+    auto response = future.get();
+    plan = response->plan;
+    cost = 1.0; // You can calculate the actual cost based on the plan
+    return mbf_msgs::action::GetPath::Result::SUCCESS;
+  } else {
+    RCLCPP_ERROR(node_->get_logger(), "Failed to call service plan_path");
+    return mbf_msgs::action::GetPath::Result::FAILURE;
+  }
 
   // call dijkstra with the goal pose as seed / start vertex
   uint32_t outcome = mbf_msgs::action::GetPath::Result::SUCCESS;
@@ -112,6 +140,8 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
   }
 
   path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("~/path", rclcpp::QoS(1).transient_local());
+  plan_path_client_ = node_->create_client<astar_octo_msgs::srv::PlanPath>("/plan_path");
+
 
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(std::bind(
       &AstarOctoPlanner::reconfigureCallback, this, std::placeholders::_1));

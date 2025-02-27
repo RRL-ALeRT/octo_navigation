@@ -38,9 +38,14 @@
 #ifndef OCTO_NAVIGATION__dijkstra_octo_planner_H
 #define OCTO_NAVIGATION__DIJKSTRA_OCTO_PLANNER_H
 
+#include <rclcpp/rclcpp.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <astar_octo_msgs/srv/plan_path.hpp>
+
 #include <mbf_octo_core/octo_planner.h>
 #include <mbf_msgs/action/get_path.hpp>
 #include <nav_msgs/msg/path.hpp>
+
 
 namespace astar_octo_planner
 {
@@ -163,6 +168,7 @@ private:
   // handle of callback for changing parameters dynamically
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr reconfiguration_callback_handle_;
   // config determined by ROS params; Init values defined here are used as default ROS param value
+  rclcpp::Client<astar_octo_msgs::srv::PlanPath>::SharedPtr plan_path_client_;
   struct {
     // publisher of resulting vector fiels
     bool publish_vector_field = false;
