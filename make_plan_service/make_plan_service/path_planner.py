@@ -19,6 +19,7 @@ class AStarPathPlanner(Node):
     def __init__(self):
         super().__init__('astar_path_planner')
         self.occupancy_grid = None
+        self.occupancy_array = None
         self.min_bound = None
 
         pointcloud_topic = "/octomap_point_cloud_centers"
@@ -52,56 +53,44 @@ class AStarPathPlanner(Node):
         except Exception as e:
             self.get_logger().error(f"Error processing point cloud: {e}")
 
-    def heuristic(self, a, b):
-        return np.linalg.norm(np.array(a) - np.array(b))
-
-    def is_within_z_constraint(self, current, neighbor):
-        z_constraint = int(Z_THRESHOLD / VOXEL_SIZE)
-        return abs(current[2] - neighbor[2]) <= z_constraint
-
-    def is_valid(self, coord):
-        return (0 <= coord[0] < self.occupancy_grid.shape[0] and
-                0 <= coord[1] < self.occupancy_grid.shape[1] and
-                0 <= coord[2] < self.occupancy_grid.shape[2] and
-                self.occupancy_grid[coord] != 100)
-
-    def has_no_occupied_cells_above(self, coord, vertical_min=0.3, vertical_range=0.6):
-        z_min = coord[2] + int(vertical_min / VOXEL_SIZE)
-        z_max = coord[2] + int(vertical_range / VOXEL_SIZE)
-
-        coords_to_check = [(coord[0], coord[1], z) for z in range(z_min, z_max + 1) if self.is_valid((coord[0], coord[1], z))]
-
-        return not any(self.occupancy_grid[c] == 100 for c in coords_to_check)
-
-    def is_cylinder_collision_free(self, coord, radius):
-        grid_radius = int(radius / VOXEL_SIZE)
-        grid_z_start = int(0.4 / VOXEL_SIZE)
-        grid_z_end = int(0.6 / VOXEL_SIZE)
-
-        num_points = int(2 * math.pi * grid_radius)
-
-        for angle in range(0, num_points, 2):
-            theta = 2 * math.pi * angle / num_points
-            i = int(grid_radius * math.cos(theta))
-            j = int(grid_radius * math.sin(theta))
-
-            for k in range(grid_z_start, grid_z_end + 1, 2):
-                check_coord = (coord[0] + i, coord[1] + j, coord[2] + k)
-                if self.is_valid(check_coord) and self.occupancy_grid[check_coord] == 100:
-                    return False
-        return True
-
     def astar(self, start, goal):
-        neighbors = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+        self.occupancy_array = self.occupancy_grid
+        neighbors = [
+            # 3D diagonals (corners) - prioritized first
+            (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1),
+            (-1, 1, 1), (-1, 1, -1), (-1, -1, 1), (-1, -1, -1),
+            # x-y plane diagonals
+            (1, 1, 0), (1, -1, 0), (-1, 1, 0), (-1, -1, 0),
+            # x-z plane diagonals
+            (1, 0, 1), (1, 0, -1), (-1, 0, 1), (-1, 0, -1),
+            # y-z plane diagonals
+            (0, 1, 1), (0, 1, -1), (0, -1, 1), (0, -1, -1),
+            # x-direction
+            (1, 0, 0), (-1, 0, 0),
+            # y-direction
+            (0, 1, 0), (0, -1, 0),
+            # z-direction
+            (0, 0, 1), (0, 0, -1)
+        ]
+        if not self.is_within_bounds(start) or not self.is_within_bounds(goal):
+            self.get_logger().error("Start or goal out of bounds")
+            return None
+        if self.is_occupied_space(start) or self.is_occupied_space(goal):
+            self.get_logger().error("Start or goal in occupied space")
+            return None
+
         open_list = []
-        heapq.heappush(open_list, (0, start))
+        heapq.heappush(open_list, (0, start))  # Priority queue with (f-score, node)
+
         came_from = {}
         g_score = {start: 0}
         f_score = {start: self.heuristic(start, goal)}
-
+        self.get_logger().info(f"Initial open_list: {open_list}")
         while open_list:
             _, current = heapq.heappop(open_list)
+
             if current == goal:
+                # Reconstruct the path
                 path = []
                 while current in came_from:
                     path.append(current)
@@ -109,31 +98,120 @@ class AStarPathPlanner(Node):
                 path.reverse()
                 return path
 
-            for dx, dy, dz in neighbors:
-                neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
-                if not self.is_valid(neighbor):
+            for i, j, k in neighbors:
+                neighbor = (current[0] + i, current[1] + j, current[2] + k)
+                #self.get_logger().info(f"Checking neighbor: {neighbor}")
+                # Ensure the neighbor is within the grid bounds
+                if not self.is_within_bounds(neighbor):
+                    self.get_logger().info(f"Neighbor {neighbor} out of bounds")
                     continue
+
+                # Plan through occupied cells only
+                if self.is_occupied_space(neighbor):
+                    self.get_logger().info(f"Neighbor {neighbor} is not occupied")
+                    continue
+
+                # Check z constraint
+                if not self.is_within_z_constraint(current, neighbor):
+                    self.get_logger().info(f"Neighbor {neighbor} not within z constraint")
+                    continue
+
+                # Check if there are occupied cells above the neighbor
+                if not self.has_no_occupied_cells_above(neighbor):
+                    self.get_logger().info(f"Neighbor {neighbor} has occupied cells above")
+                    continue
+
+                if not self.is_cylinder_collision_free(neighbor, ROBOT_RADIUS):
+                    self.get_logger().info(f"Neighbor {neighbor} is not collision-free")
+                    continue
+
                 tentative_g_score = g_score[current] + self.heuristic(current, neighbor)
+
                 if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                    self.get_logger().info(f"✅ Updating {neighbor}: g={tentative_g_score}")
                     came_from[neighbor] = current
                     g_score[neighbor] = tentative_g_score
                     f_score[neighbor] = tentative_g_score + self.heuristic(neighbor, goal)
                     heapq.heappush(open_list, (f_score[neighbor], neighbor))
-        return None
+
+        return None  # Return None if no path is found
+
+    def heuristic(self,a, b):
+        # Euclidean distance as heuristic
+        return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
+
+    def is_within_z_constraint(self,current, neighbor):
+        z_constraint = int(Z_THRESHOLD / VOXEL_SIZE)
+        return abs(current[2] - neighbor[2]) <= z_constraint
+
+    def is_within_bounds(self, coord):
+        return 0 <= coord[0] < self.occupancy_array.shape[0] and 0 <= coord[1] < self.occupancy_array.shape[1] and 0 <= coord[2] < self.occupancy_array.shape[2]
+
+    def is_occupied_space(self, coord):
+        coord = tuple(map(int, coord))
+        return self.occupancy_array[coord[0], coord[1], coord[2]] == 100
+
+    def has_no_occupied_cells_above(self, coord, vertical_min=0.3, vertical_range=0.6):
+        z_min = coord[2] + int(vertical_min / VOXEL_SIZE)  # Start checking
+        z_max = coord[2] + int(vertical_range / VOXEL_SIZE)  # End checking within the vertical range
+
+        # Use list comprehension to create a list of coordinates to check
+        coords_to_check = [(coord[0], coord[1], z) for z in range(z_min, z_max + 1) if self.is_within_bounds((coord[0], coord[1], z))]
+
+        # Check all coordinates in one batch if possible
+        return not any(self.is_occupied_space(c) for c in coords_to_check)
+
+    def is_cylinder_collision_free(self, coord, radius):
+        # Convert radius and base offset from meters to voxel grid units
+        grid_radius = radius / VOXEL_SIZE
+        grid_z_start = int(0.4 / VOXEL_SIZE)
+        grid_z_end = int(0.6 / VOXEL_SIZE)
+
+        # Calculate the number of points to check around the circumference
+        num_points = int(2 * math.pi * grid_radius)
+
+        # Iterate over the points on the circumference
+        for angle in range(0, num_points, 2):
+            theta = 2 * math.pi * angle / num_points
+            i = int(grid_radius * math.cos(theta))
+            j = int(grid_radius * math.sin(theta))
+
+            for k in range(grid_z_start, grid_z_end + 1, 2):
+                check_coord = (coord[0] + i, coord[1] + j, coord[2] + k)
+                if self.is_within_bounds(check_coord) and self.is_occupied_space(check_coord):
+                    return False  # Early exit if any occupied space is found
+
+        return True  # No collision found
+
+
 
     def plan_path_callback(self, request, response):
+        start = (int(request.start.pose.position.x), int(request.start.pose.position.y), int(request.start.pose.position.z))
+        goal = (int(request.goal.pose.position.x), int(request.goal.pose.position.y), int(request.goal.pose.position.z))
 
-        start = (request.start.pose.position.x, request.start.pose.position.y, request.start.pose.position.z)  # Replace with actual start
-        goal = (request.goal.pose.position.x, request.goal.pose.position.y, request.goal.pose.position.z)  # Replace with actual goal
         self.get_logger().info(f"Start position: {start}")
+        self.get_logger().info(f"Goal position: {goal}")
+
         path = self.astar(start, goal)
+
         if path:
             self.get_logger().info("Path found")
-            response.success = True
+            response.plan = [self.create_pose_stamped(coord) for coord in path]
         else:
             self.get_logger().info("No path found")
-            response.success = False
+            response.plan = []
+
         return response
+
+    def create_pose_stamped(self, coord):
+        pose_stamped = PoseStamped()
+        pose_stamped.header.frame_id = "map"  # Set the appropriate frame ID
+        pose_stamped.header.stamp = self.get_clock().now().to_msg()
+        pose_stamped.pose.position.x = float(coord[0])
+        pose_stamped.pose.position.y = float(coord[1])
+        pose_stamped.pose.position.z = float(coord[2])
+        pose_stamped.pose.orientation.w = 1.0  # Set a default orientation
+        return pose_stamped
 
 
 def main(args=None):
