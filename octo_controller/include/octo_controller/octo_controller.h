@@ -123,7 +123,7 @@ private:
 
   //! the goal and robot pose
   //mesh_map::Vector goal_pos_, robot_pos_;
-
+  geometry_msgs::msg::PoseStamped goal_pos_, current_pose_;
   //! the goal's and robot's orientation
   //mesh_map::Normal goal_dir_, robot_dir_;
 
@@ -136,6 +136,11 @@ private:
 
   // handle of callback for changing parameters dynamically
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr reconfiguration_callback_handle_;
+
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr pure_pursuit_vel_sub_;
+  void pp_vel_cb(const geometry_msgs::msg::Twist::SharedPtr msg);
+
+  geometry_msgs::msg::Twist::SharedPtr received_twist_;
 
   struct {
     double max_lin_velocity = 1.0;

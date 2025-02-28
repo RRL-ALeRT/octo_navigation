@@ -68,11 +68,15 @@ uint32_t OctoController::computeVelocityCommands(const geometry_msgs::msg::PoseS
 {
 
   std::array<float, 2> velocities;
-  velocities[0] = 5.0;
-  velocities[1] = 0.0;
-  cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, velocities[0] * config_.lin_vel_factor);
-  cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, velocities[1] * config_.ang_vel_factor);
-  cmd_vel.header.stamp = node_->now();
+  if (received_twist_){
+
+    velocities[0] = received_twist_->linear.x;
+    velocities[1] = received_twist_->angular.z;
+    cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, velocities[0] * config_.lin_vel_factor);
+    cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, velocities[1] * config_.ang_vel_factor);
+    cmd_vel.header.stamp = node_->now();
+  }
+
 
   if (cancel_requested_)
   {
@@ -81,26 +85,35 @@ uint32_t OctoController::computeVelocityCommands(const geometry_msgs::msg::PoseS
   return mbf_msgs::action::ExePath::Result::SUCCESS;
 }
 
+
 bool OctoController::isGoalReached(double dist_tolerance, double angle_tolerance)
 {
-  // TODO: goal distance = goal pos - robot pos; angle acos of goal dir and robot dir
-  float goal_distance = 10.0;
-  float angle = 1.0;
-  return goal_distance <= static_cast<float>(dist_tolerance) && angle <= static_cast<float>(angle_tolerance);;
+  // Calculate the Euclidean distance between the robot's current position and the goal position
+  double dx = goal_pos_.pose.position.x - current_pose_.pose.position.x;
+  double dy = goal_pos_.pose.position.y - current_pose_.pose.position.y;
+  double dz = goal_pos_.pose.position.z - current_pose_.pose.position.z;
+  double goal_distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+  // Calculate the angle difference between the robot's current orientation and the goal orientation
+  double angle = std::acos(std::cos(current_pose_.pose.orientation.z - goal_pos_.pose.orientation.z));
+  dist_tolerance = 0.1;
+  return goal_distance <= dist_tolerance;
 }
 
 bool OctoController::setPlan(const std::vector<geometry_msgs::msg::PoseStamped>& plan)
 {
-  // copy vector field // TODO just use vector field without copying
-  //ToDo: save plan, get goal position and direction
-  cancel_requested_ = false;
   current_plan_ = plan;
+  goal_pos_ = current_plan_.back(); // Store the goal position
+  cancel_requested_ = false;
   return true;
+}
+void OctoController::pp_vel_cb(const geometry_msgs::msg::Twist::SharedPtr msg) {
+    received_twist_ = msg;
 }
 
 bool OctoController::cancel()
 {
-  RCLCPP_INFO_STREAM(node_->get_logger(), "The MeshController has been requested to cancel!");
+  RCLCPP_INFO_STREAM(node_->get_logger(), "The OctoController has been requested to cancel!");
   cancel_requested_ = true;
   return true;
 }
@@ -217,6 +230,9 @@ bool OctoController::initialize(const std::string& plugin_name,
 
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(std::bind(
       &OctoController::reconfigureCallback, this, std::placeholders::_1));
+
+  pure_pursuit_vel_sub_ = node_->create_subscription<geometry_msgs::msg::Twist>(
+    "/pp_vel", 10, std::bind(&OctoController::pp_vel_cb, this, std::placeholders::_1));
 
   return true;
 }
