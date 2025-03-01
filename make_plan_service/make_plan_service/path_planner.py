@@ -12,9 +12,9 @@ import math
 from copy import deepcopy
 
 VOXEL_SIZE = 0.1  # Adjust voxel size as needed
-Z_THRESHOLD = 0.5  # Max step height allowed
-ROBOT_RADIUS = 0.3  # Robot radius in meters
-
+Z_THRESHOLD = 0.2  # Max step height allowed
+ROBOT_RADIUS = 0.2  # Robot radius in meters
+IS_SIMULATION = False
 class AStarPathPlanner(Node):
     def __init__(self):
         super().__init__('astar_path_planner')
@@ -25,6 +25,20 @@ class AStarPathPlanner(Node):
         pointcloud_topic = "/octomap_point_cloud_centers"
         self.sub_pc2 = self.create_subscription(PointCloud2, pointcloud_topic, self.pointcloud2_callback, 1)
         self.srv = self.create_service(PlanPath, 'plan_path', self.plan_path_callback)
+
+    def world_to_grid(self, world_coords, min_bound, voxel_size):
+        return tuple(
+            int((world_coords[i] - min_bound[i]) / voxel_size)
+            for i in range(3)
+            )
+
+
+    def grid_to_world(self, grid_coords, min_bound, voxel_size):
+        return tuple(
+            grid_coords[i] * voxel_size + min_bound[i]
+            for i in range(3)
+            )
+
 
     def pointcloud2_callback(self, msg):
         try:
@@ -52,9 +66,23 @@ class AStarPathPlanner(Node):
             self.occupancy_grid = deepcopy(occupancy_grid)
         except Exception as e:
             self.get_logger().error(f"Error processing point cloud: {e}")
+    def find_nearest_3d_point(self, x, y, z, array_3d):
+        indices = np.argwhere(array_3d == 100)
+
+        distances = np.sqrt((indices[:, 0] - x)**2 + (indices[:, 1] - y)**2 + (indices[:, 2] - z)**2)
+        nearest_index = indices[np.argmin(distances)]
+
+        return tuple(nearest_index)
 
     def astar(self, start, goal):
+        self.get_logger().info(f"World Start: {start}, Grid Start: {self.world_to_grid(start, self.min_bound, VOXEL_SIZE)}")
+        self.get_logger().info(f"World Goal: {goal}, Grid Goal: {self.world_to_grid(goal, self.min_bound, VOXEL_SIZE)}")
         self.occupancy_array = self.occupancy_grid
+        #start = self.world_to_grid(start, self.min_bound, VOXEL_SIZE)
+        #goal = self.world_to_grid(goal, self.min_bound, VOXEL_SIZE)
+        self.get_logger().info(f"World Start: {start}, Grid Start: {self.world_to_grid(start, self.min_bound, VOXEL_SIZE)}")
+        self.get_logger().info(f"World Goal: {goal}, Grid Goal: {self.world_to_grid(goal, self.min_bound, VOXEL_SIZE)}")
+        start = self.find_nearest_3d_point(start[0], start[1], start[2], self.occupancy_grid)
         neighbors = [
             # 3D diagonals (corners) - prioritized first
             (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1),
@@ -72,11 +100,18 @@ class AStarPathPlanner(Node):
             # z-direction
             (0, 0, 1), (0, 0, -1)
         ]
-        if not self.is_within_bounds(start) or not self.is_within_bounds(goal):
-            self.get_logger().error("Start or goal out of bounds")
+
+        # Check if the calculated indices are within the bounds of the occupancy grid
+        if not (0 <= start[0] < self.occupancy_grid.shape[0] and
+                0 <= start[1] < self.occupancy_grid.shape[1] and
+                0 <= start[2] < self.occupancy_grid.shape[2]):
+            self.get_logger().warn(f"Start coordinates {start} are out of bounds.")
             return None
-        if self.is_occupied_space(start) or self.is_occupied_space(goal):
-            self.get_logger().error("Start or goal in occupied space")
+
+        if not (0 <= goal[0] < self.occupancy_grid.shape[0] and
+                0 <= goal[1] < self.occupancy_grid.shape[1] and
+                0 <= goal[2] < self.occupancy_grid.shape[2]):
+            self.get_logger().warn(f"Goal coordinates {goal} are out of bounds.")
             return None
 
         open_list = []
@@ -101,13 +136,16 @@ class AStarPathPlanner(Node):
             for i, j, k in neighbors:
                 neighbor = (current[0] + i, current[1] + j, current[2] + k)
                 #self.get_logger().info(f"Checking neighbor: {neighbor}")
+
                 # Ensure the neighbor is within the grid bounds
-                if not self.is_within_bounds(neighbor):
+                if not (0 <= neighbor[0] < self.occupancy_array.shape[0] and
+                    0 <= neighbor[1] < self.occupancy_array.shape[1] and
+                    0 <= neighbor[2] < self.occupancy_array.shape[2]):
                     self.get_logger().info(f"Neighbor {neighbor} out of bounds")
                     continue
 
                 # Plan through occupied cells only
-                if self.is_occupied_space(neighbor):
+                if self.occupancy_array[neighbor[0], neighbor[1], neighbor[2]] != 100:
                     self.get_logger().info(f"Neighbor {neighbor} is not occupied")
                     continue
 
@@ -186,8 +224,8 @@ class AStarPathPlanner(Node):
 
 
     def plan_path_callback(self, request, response):
-        start = (int(request.start.pose.position.x), int(request.start.pose.position.y), int(request.start.pose.position.z))
-        goal = (int(request.goal.pose.position.x), int(request.goal.pose.position.y), int(request.goal.pose.position.z))
+        start = ((request.start.pose.position.x), (request.start.pose.position.y), (request.start.pose.position.z))
+        goal = ((request.goal.pose.position.x), (request.goal.pose.position.y), (request.goal.pose.position.z))
 
         self.get_logger().info(f"Start position: {start}")
         self.get_logger().info(f"Goal position: {goal}")
