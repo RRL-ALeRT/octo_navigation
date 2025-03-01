@@ -68,6 +68,7 @@ uint32_t OctoController::computeVelocityCommands(const geometry_msgs::msg::PoseS
 {
 
   std::array<float, 2> velocities;
+  current_pose_ = pose;
   if (received_twist_){
 
     velocities[0] = received_twist_->linear.x;
