@@ -36,7 +36,7 @@ Start in different terminals:
 
 `ros2 run pure_pursuit_controller obstacle_avoidance_path_to_vel`
 
-`rviz`
+`rviz2`
 
 ### Send a Goal
 Type `ros2 action send_goal /move_base_flex/move_base mbf_msgs/action/MoveBase "t<tab>`
