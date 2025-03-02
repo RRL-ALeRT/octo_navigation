@@ -27,8 +27,8 @@ class PurePursuit(Node):
         self.robot_yaw = 0.0
         self.robot_foot_location = [0.0, 0.0, 0.0]
         self.path = []
-        self.lookahead_distance = 0.5  # meters
-        self.goal_tolerance = 0.1  # meters
+        self.lookahead_distance = 0.3  # meters
+        self.goal_tolerance = 0.5  # meters
 
     def path_callback(self, msg):
         self.path = [(pose.pose.position.x, pose.pose.position.y) for pose in msg.poses]

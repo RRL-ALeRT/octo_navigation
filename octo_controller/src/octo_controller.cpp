@@ -97,7 +97,7 @@ bool OctoController::isGoalReached(double dist_tolerance, double angle_tolerance
 
   // Calculate the angle difference between the robot's current orientation and the goal orientation
   double angle = std::acos(std::cos(current_pose_.pose.orientation.z - goal_pos_.pose.orientation.z));
-  dist_tolerance = 0.1;
+  dist_tolerance = 0.3;
   return goal_distance <= dist_tolerance;
 }
 
