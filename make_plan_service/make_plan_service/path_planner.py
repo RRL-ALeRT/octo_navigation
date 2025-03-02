@@ -11,9 +11,9 @@ import open3d as o3d
 import math
 from copy import deepcopy
 
-VOXEL_SIZE = 0.1  # Adjust voxel size as needed
-Z_THRESHOLD = 0.2  # Max step height allowed
-ROBOT_RADIUS = 0.2  # Robot radius in meters
+VOXEL_SIZE = 0.05  # Adjust voxel size as needed
+Z_THRESHOLD = 0.3  # Max step height allowed
+ROBOT_RADIUS = 0.3  # Robot radius in meters
 IS_SIMULATION = False
 class AStarPathPlanner(Node):
     def __init__(self):
@@ -147,7 +147,7 @@ class AStarPathPlanner(Node):
                 # Plan through occupied cells only
                 if self.occupancy_array[neighbor[0], neighbor[1], neighbor[2]] != 100:
                     self.get_logger().info(f"Neighbor {neighbor} is not occupied")
-                    continue
+                    #continue
 
                 # Check z constraint
                 if not self.is_within_z_constraint(current, neighbor):
@@ -155,13 +155,13 @@ class AStarPathPlanner(Node):
                     continue
 
                 # Check if there are occupied cells above the neighbor
-                if not self.has_no_occupied_cells_above(neighbor):
-                    self.get_logger().info(f"Neighbor {neighbor} has occupied cells above")
-                    continue
+                # if not self.has_no_occupied_cells_above(neighbor):
+                #     self.get_logger().info(f"Neighbor {neighbor} has occupied cells above")
+                #     continue
 
-                if not self.is_cylinder_collision_free(neighbor, ROBOT_RADIUS):
-                    self.get_logger().info(f"Neighbor {neighbor} is not collision-free")
-                    continue
+                # if not self.is_cylinder_collision_free(neighbor, ROBOT_RADIUS):
+                #     self.get_logger().info(f"Neighbor {neighbor} is not collision-free")
+                #     continue
 
                 tentative_g_score = g_score[current] + self.heuristic(current, neighbor)
 
@@ -186,18 +186,18 @@ class AStarPathPlanner(Node):
         return 0 <= coord[0] < self.occupancy_array.shape[0] and 0 <= coord[1] < self.occupancy_array.shape[1] and 0 <= coord[2] < self.occupancy_array.shape[2]
 
     def is_occupied_space(self, coord):
-        coord = tuple(map(int, coord))
+        #coord = tuple(map(int, coord))
         return self.occupancy_array[coord[0], coord[1], coord[2]] == 100
 
     def has_no_occupied_cells_above(self, coord, vertical_min=0.3, vertical_range=0.6):
         z_min = coord[2] + int(vertical_min / VOXEL_SIZE)  # Start checking
-        z_max = coord[2] + int(vertical_range / VOXEL_SIZE)  # End checking within the vertical range
+        z_max = coord[2] + int(vertical_range / VOXEL_SIZE)  # End checking
 
-        # Use list comprehension to create a list of coordinates to check
-        coords_to_check = [(coord[0], coord[1], z) for z in range(z_min, z_max + 1) if self.is_within_bounds((coord[0], coord[1], z))]
-
-        # Check all coordinates in one batch if possible
-        return not any(self.is_occupied_space(c) for c in coords_to_check)
+        for z in range(z_min, z_max + 1):
+            if self.is_within_bounds((coord[0], coord[1], z)):
+                if self.is_occupied_space((coord[0], coord[1], z)):  # Found an obstacle
+                    return True  # Allow stepping over it
+        return False
 
     def is_cylinder_collision_free(self, coord, radius):
         # Convert radius and base offset from meters to voxel grid units
@@ -230,8 +230,8 @@ class AStarPathPlanner(Node):
         self.get_logger().info(f"Start position: {start}")
         self.get_logger().info(f"Goal position: {goal}")
 
-        path = self.astar(start, goal)
-
+        #path = self.astar(start, goal)
+        path = [start, goal]
         if path:
             self.get_logger().info("Path found")
             response.plan = [self.create_pose_stamped(coord) for coord in path]
@@ -243,7 +243,7 @@ class AStarPathPlanner(Node):
 
     def create_pose_stamped(self, coord):
         pose_stamped = PoseStamped()
-        pose_stamped.header.frame_id = "map"  # Set the appropriate frame ID
+        pose_stamped.header.frame_id = "odom"  # Set the appropriate frame ID
         pose_stamped.header.stamp = self.get_clock().now().to_msg()
         pose_stamped.pose.position.x = float(coord[0])
         pose_stamped.pose.position.y = float(coord[1])
