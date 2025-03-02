@@ -20,7 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'path_planner = make_plan_service.path_planner:main'
+            'path_planner = make_plan_service.path_planner:main',
+            'density_astar_path_planner = make_plan_service.density_astar_path_planner:main',
         ],
     },
 )

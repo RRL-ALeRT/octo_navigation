@@ -32,9 +32,9 @@ Start in different terminals:
 
 `ros2 launch octomap_server octomap_webots_launch.py`
 
-`ros2 run make_plan_service path_planner`
+`ros2 run make_plan_service density_astar_path_planner`
 
-`ros2 run pure_pursuit_controller path_to_vel`
+`ros2 run pure_pursuit_controller obstacle_avoidance_path_to_vel`
 
 `rviz`
 
@@ -74,8 +74,6 @@ If you want to see the octomap:
 OccupancyGrid: `/octomap_binary`
 ## Issues
 
-Astar not finding correct path, fix: `make_plan_service/path_planner.py`
+Octo Controller does not stop when reaching goal, fix: `pure_pursuit_controller/obstacle_avoidance_path_to_vel.py`
 
-Octo Controller does not stop when reaching goal, fix: `pure_pursuit_controller/path_to_vel.py`
-
-Both based on: https://github.com/skpawar1305/easy_3D_navigation/blob/main/plan_3d_path.py
+The path planner is based on the modified A* algorithm. For more details, refer to the [documentation](Study_on_A-Star_Algorithm-Based_3D_Path_Optimizati.pdf).
