@@ -168,7 +168,7 @@ private:
   // handle of callback for changing parameters dynamically
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr reconfiguration_callback_handle_;
   // config determined by ROS params; Init values defined here are used as default ROS param value
-  rclcpp::Client<astar_octo_msgs::srv::PlanPath>::SharedPtr plan_path_client_;
+  rclcpp::Client<astar_octo_msgs::srv::PlanPath>::SharedPtr density_astar_plan_path_client_;
   struct {
     // publisher of resulting vector fiels
     bool publish_vector_field = false;

@@ -20,7 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'path_to_vel = pure_pursuit_controller.path_to_vel:main'
+            'obsstacle_avoidance_path_to_vel = pure_pursuit_controller.obstacle_avoidance_path_to_vel:main',
         ],
     },
 )

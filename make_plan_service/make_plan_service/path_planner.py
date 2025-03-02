@@ -4,7 +4,7 @@ from sensor_msgs.msg import PointCloud2
 from geometry_msgs.msg import PoseStamped
 from astar_octo_msgs.srv import PlanPath
 from sensor_msgs_py import point_cloud2
-from std_srvs.srv import SetBool
+from nav_msgs.msg import Odometry
 import numpy as np
 import heapq
 import open3d as o3d
@@ -21,12 +21,17 @@ class AStarPathPlanner(Node):
         self.occupancy_grid = None
         self.occupancy_array = None
         self.min_bound = None
+        self.current_pose = None
 
         pointcloud_topic = "/octomap_point_cloud_centers"
         self.sub_pc2 = self.create_subscription(PointCloud2, pointcloud_topic, self.pointcloud2_callback, 1)
+        self.sub_pose = self.create_subscription(Odometry, "/Spot/odometry", self.pose_callback, 1)
         self.srv = self.create_service(PlanPath, 'plan_path', self.plan_path_callback)
 
-    def pointcloud2_callback(self, msg):
+    def pose_callback(self, msg: Odometry):
+        self.current_pose = msg.pose.pose
+
+    def pointcloud2_callback(self, msg: PointCloud2):
         try:
             points = np.array([[float(p[0]), float(p[1]), float(p[2])] for p in point_cloud2.read_points(msg, skip_nans=True)])
             if points.size == 0:
@@ -53,7 +58,7 @@ class AStarPathPlanner(Node):
         except Exception as e:
             self.get_logger().error(f"Error processing point cloud: {e}")
 
-    def astar(self, start, goal):
+    def astar(self, start: tuple, goal: tuple):
         self.occupancy_array = self.occupancy_grid
         neighbors = [
             # 3D diagonals (corners) - prioritized first
@@ -76,7 +81,8 @@ class AStarPathPlanner(Node):
             self.get_logger().error("Start or goal out of bounds")
             return None
         if self.is_occupied_space(start) or self.is_occupied_space(goal):
-            self.get_logger().error("Start or goal in occupied space")
+            self.get_logger().error(f"Start or goal in occupied space: start={start}, goal={goal}")
+            self.get_logger().error(f"Occupancy at start: {self.occupancy_array[start]}, Occupancy at goal: {self.occupancy_array[goal]}")
             return None
 
         open_list = []
@@ -100,35 +106,28 @@ class AStarPathPlanner(Node):
 
             for i, j, k in neighbors:
                 neighbor = (current[0] + i, current[1] + j, current[2] + k)
-                #self.get_logger().info(f"Checking neighbor: {neighbor}")
                 # Ensure the neighbor is within the grid bounds
                 if not self.is_within_bounds(neighbor):
-                    self.get_logger().info(f"Neighbor {neighbor} out of bounds")
                     continue
 
-                # Plan through occupied cells only
+                # Avoid occupied cells
                 if self.is_occupied_space(neighbor):
-                    self.get_logger().info(f"Neighbor {neighbor} is not occupied")
                     continue
 
                 # Check z constraint
                 if not self.is_within_z_constraint(current, neighbor):
-                    self.get_logger().info(f"Neighbor {neighbor} not within z constraint")
                     continue
 
                 # Check if there are occupied cells above the neighbor
                 if not self.has_no_occupied_cells_above(neighbor):
-                    self.get_logger().info(f"Neighbor {neighbor} has occupied cells above")
                     continue
 
                 if not self.is_cylinder_collision_free(neighbor, ROBOT_RADIUS):
-                    self.get_logger().info(f"Neighbor {neighbor} is not collision-free")
                     continue
 
                 tentative_g_score = g_score[current] + self.heuristic(current, neighbor)
 
                 if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
-                    self.get_logger().info(f"✅ Updating {neighbor}: g={tentative_g_score}")
                     came_from[neighbor] = current
                     g_score[neighbor] = tentative_g_score
                     f_score[neighbor] = tentative_g_score + self.heuristic(neighbor, goal)
@@ -136,22 +135,22 @@ class AStarPathPlanner(Node):
 
         return None  # Return None if no path is found
 
-    def heuristic(self,a, b):
+    def heuristic(self, a: tuple, b: tuple) -> float:
         # Euclidean distance as heuristic
         return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
-    def is_within_z_constraint(self,current, neighbor):
+    def is_within_z_constraint(self, current: tuple, neighbor: tuple) -> bool:
         z_constraint = int(Z_THRESHOLD / VOXEL_SIZE)
         return abs(current[2] - neighbor[2]) <= z_constraint
 
-    def is_within_bounds(self, coord):
+    def is_within_bounds(self, coord: tuple) -> bool:
         return 0 <= coord[0] < self.occupancy_array.shape[0] and 0 <= coord[1] < self.occupancy_array.shape[1] and 0 <= coord[2] < self.occupancy_array.shape[2]
 
-    def is_occupied_space(self, coord):
+    def is_occupied_space(self, coord: tuple) -> bool:
         coord = tuple(map(int, coord))
         return self.occupancy_array[coord[0], coord[1], coord[2]] == 100
 
-    def has_no_occupied_cells_above(self, coord, vertical_min=0.3, vertical_range=0.6):
+    def has_no_occupied_cells_above(self, coord: tuple, vertical_min: float = 0.3, vertical_range: float = 0.6) -> bool:
         z_min = coord[2] + int(vertical_min / VOXEL_SIZE)  # Start checking
         z_max = coord[2] + int(vertical_range / VOXEL_SIZE)  # End checking within the vertical range
 
@@ -161,7 +160,7 @@ class AStarPathPlanner(Node):
         # Check all coordinates in one batch if possible
         return not any(self.is_occupied_space(c) for c in coords_to_check)
 
-    def is_cylinder_collision_free(self, coord, radius):
+    def is_cylinder_collision_free(self, coord: tuple, radius: float) -> bool:
         # Convert radius and base offset from meters to voxel grid units
         grid_radius = radius / VOXEL_SIZE
         grid_z_start = int(0.4 / VOXEL_SIZE)
@@ -183,10 +182,12 @@ class AStarPathPlanner(Node):
 
         return True  # No collision found
 
-
-
-    def plan_path_callback(self, request, response):
-        start = (int(request.start.pose.position.x), int(request.start.pose.position.y), int(request.start.pose.position.z))
+    def plan_path_callback(self, request: PlanPath.Request, response: PlanPath.Response) -> PlanPath.Response:
+        if self.current_pose:
+            start = (int(self.current_pose.position.x), int(self.current_pose.position.y), int(self.current_pose.position.z))
+        else:
+            start = (int(request.start.pose.position.x), int(request.start.pose.position.y), int(request.start.pose.position.z))
+        
         goal = (int(request.goal.pose.position.x), int(request.goal.pose.position.y), int(request.goal.pose.position.z))
 
         self.get_logger().info(f"Start position: {start}")
@@ -203,7 +204,7 @@ class AStarPathPlanner(Node):
 
         return response
 
-    def create_pose_stamped(self, coord):
+    def create_pose_stamped(self, coord: tuple) -> PoseStamped:
         pose_stamped = PoseStamped()
         pose_stamped.header.frame_id = "map"  # Set the appropriate frame ID
         pose_stamped.header.stamp = self.get_clock().now().to_msg()

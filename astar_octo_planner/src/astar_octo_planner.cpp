@@ -64,7 +64,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   auto request = std::make_shared<astar_octo_msgs::srv::PlanPath::Request>();
   request->start = start;
   request->goal = goal;
-  while (!plan_path_client_->wait_for_service(std::chrono::seconds(1))) {
+  while (!density_astar_plan_path_client_->wait_for_service(std::chrono::seconds(1))) {
     if (!rclcpp::ok()) {
       RCLCPP_ERROR(node_->get_logger(), "Interrupted while waiting for the service. Exiting.");
       outcome = mbf_msgs::action::GetPath::Result::FAILURE;
@@ -73,7 +73,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   }
 
     // Send the request and wait for the response
-  auto future = plan_path_client_->async_send_request(request);
+  auto future = density_astar_plan_path_client_->async_send_request(request);
 
   auto response = future.get();
   if (!response->plan.empty()) {
@@ -130,7 +130,7 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
   }
 
   path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("~/path", rclcpp::QoS(1).transient_local());
-  plan_path_client_ = node_->create_client<astar_octo_msgs::srv::PlanPath>("/plan_path");
+  density_astar_plan_path_client_ = node_->create_client<astar_octo_msgs::srv::PlanPath>("/density_astar_plan_path");
 
 
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(std::bind(
