@@ -1,107 +1,187 @@
 import rclpy
 from rclpy.node import Node
+from nav_msgs.msg import Path
+from geometry_msgs.msg import Twist
 import tf2_ros
+from std_srvs.srv import SetBool
 import math
-from geometry_msgs.msg import TransformStamped, Twist
-from nav_msgs.msg import Path
-from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path
 
-IS_SIMULATION = False
+# Constants
+SPEED = 0.4
+LOOKAHEAD_DISTANCE = 0.4
+TARGET_ERROR = 0.3
+TARGET_ALLOWED_TIME = 10
+IS_SIMULATION = True
 
-def yaw_from_quaternion(x, y, z, w):
-    t3 = 2.0 * (w * z + x * y)
-    t4 = 1.0 - 2.0 * (y * y + z * z)
-    return math.atan2(t3, t4)
-
-class PurePursuit(Node):
+class PurePursuitController(Node):
     def __init__(self):
         super().__init__('pure_pursuit_node')
+
+        self.declare_parameter('path_topic', '/move_base_flex/path')
+        self.declare_parameter('cmd_vel_topic', '/pp_vel')
+        self.declare_parameter('robot_frame', 'base_footprint')
+        self.declare_parameter('odom_frame', 'odom')
+        self.declare_parameter('map_frame', 'map')
+
+        self.path_topic = self.get_parameter('path_topic').get_parameter_value().string_value
+        self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').get_parameter_value().string_value
+        self.robot_frame = self.get_parameter('robot_frame').get_parameter_value().string_value
+        self.odom_frame = self.get_parameter('odom_frame').get_parameter_value().string_value
+        self.map_frame = self.get_parameter('map_frame').get_parameter_value().string_value
+
+        self.twist_publisher = self.create_publisher(Twist, self.cmd_vel_topic, 1)
+        self.current_path_world = []
+        self.path_subscriber = self.create_subscription(Path, self.path_topic, self.path_callback, 10)
+
+        # Initialize the transform buffer and listener
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-        self.cmd_pub = self.create_publisher(Twist, '/pp_vel', 10)
-        self.path_sub = self.create_subscription(Path, '/move_base_flex/path', self.path_callback, 10)
-        self.timer = self.create_timer(0.1, self.pure_pursuit_control)
 
-        self.robot_position = [0.0, 0.0]
-        self.robot_yaw = 0.0
-        self.robot_foot_location = [0.0, 0.0, 0.0]
-        self.path = []
-        self.lookahead_distance = 0.3  # meters
-        self.goal_tolerance = 0.5  # meters
+        self.create_timer(0.1, self.path_follower_timer_callback)
+
+        self.in_motion = False
+        self.pursuit_index = 0
+
+        self.srv = self.create_service(SetBool, '/navigation/follow_path', self.set_in_motion_callback)
+
+        self.target_allowed_time = TARGET_ALLOWED_TIME
+
+    def set_in_motion_callback(self, request, response):
+        self.in_motion = request.data
+        response.success = True
+        response.message = f"in_motion set to {self.in_motion}"
+        return response
 
     def path_callback(self, msg):
-        self.path = [(pose.pose.position.x, pose.pose.position.y) for pose in msg.poses]
+        self.path = msg
+        self.current_index = 0
+        self.get_logger().info(f"Received new path with {len(msg.poses)} poses")
+        self.current_path_world = []
+        for p in self.path.poses:
+            self.current_path_world.append([p.pose.position.x, p.pose.position.y])
+        self.in_motion = True
+    def path_follower_timer_callback(self):
+        if not self.in_motion:
+            twist_command_zero = Twist()
+            twist_command_zero.linear.x = 0.0
+            twist_command_zero.angular.z = 0.0
+            self.twist_publisher.publish(twist_command_zero)
+            return
 
-    def get_robot_pose(self):
+        if not hasattr(self, "current_path_world"):
+            self.get_logger().warn("Path Not Yet Planned")
+            return
+
+        if len(self.current_path_world) == 0:
+            return
+
         try:
-            base_frame = "base_footprint" if IS_SIMULATION else "gpe"
-            transform = self.tf_buffer.lookup_transform("map", base_frame, rclpy.time.Time())
-            self.robot_foot_location = [transform.transform.translation.x, transform.transform.translation.y, transform.transform.translation.z]
+            transform = self.tf_buffer.lookup_transform(self.map_frame, self.robot_frame, rclpy.time.Time())
 
             # Extract the robot's position and orientation in the "map" frame
-            x = transform.transform.translation.x
-            y = transform.transform.translation.y
-            self.robot_yaw = yaw_from_quaternion(transform.transform.rotation.x,
-                                                transform.transform.rotation.y,
-                                                transform.transform.rotation.z,
-                                                transform.transform.rotation.w)
-            self.robot_position = [x, y]
+            self.x = transform.transform.translation.x
+            self.y = transform.transform.translation.y
+            self.robot_yaw = self.yaw_from_quaternion(transform.transform.rotation.x,
+                                                     transform.transform.rotation.y,
+                                                     transform.transform.rotation.z,
+                                                     transform.transform.rotation.w)
+
+            self.robot_position = [self.x, self.y]
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as ex:
-            pass
-
-    def find_lookahead_point(self):
-        if not self.path:
-            return None
-
-        for point in self.path:
-            dist = math.sqrt((point[0] - self.robot_position[0])**2 + (point[1] - self.robot_position[1])**2)
-            if dist >= self.lookahead_distance:
-                return point
-        return self.path[-1] if self.path else None
-
-    def goal_reached(self):
-        if not self.path:
-            return False
-        goal_x, goal_y = self.path[-1]
-        dist_to_goal = math.sqrt((goal_x - self.robot_position[0])**2 + (goal_y - self.robot_position[1])**2)
-        return dist_to_goal < self.goal_tolerance
-
-    def pure_pursuit_control(self):
-        self.get_robot_pose()
-
-        if self.goal_reached():
-            cmd_msg = Twist()
-            cmd_msg.linear.x = 0.0
-            cmd_msg.angular.z = 0.0
-            self.cmd_pub.publish(cmd_msg)
-            self.get_logger().info("Goal reached!")
+            self.get_logger().warn("Could not get transform from map to body: {}".format(ex))
             return
 
-        lookahead = self.find_lookahead_point()
-        if not lookahead:
-            return
+        linear_velocity, angular_velocity, self.pursuit_index = self.pure_pursuit(
+            self.x,
+            self.y,
+            self.robot_yaw,
+            self.current_path_world,
+            self.pursuit_index,
+            SPEED,
+            LOOKAHEAD_DISTANCE
+        )
 
-        lx, ly = lookahead
-        dx = lx - self.robot_position[0]
-        dy = ly - self.robot_position[1]
+        if(abs(self.x - self.current_path_world[-1][0]) < TARGET_ERROR and abs(self.y - self.current_path_world[-1][1]) < TARGET_ERROR):
+            self.in_motion = False
+            self.get_logger().info("Target reached")
+            linear_velocity = 0
+            angular_velocity = 0
+            self.current_path_world = []
+            self.in_motion = False
 
-        angle_to_target = math.atan2(dy, dx)
-        steering_angle = angle_to_target - self.robot_yaw
-        steering_angle = math.atan2(math.sin(steering_angle), math.cos(steering_angle))
+        # Publish the twist commands
+        twist_command = Twist()
+        twist_command.linear.x = float(linear_velocity)
+        twist_command.angular.z = float(angular_velocity)
+        self.twist_publisher.publish(twist_command)
 
-        cmd_msg = Twist()
-        cmd_msg.linear.x = 0.5  # Constant forward velocity
-        cmd_msg.angular.z = 2.0 * steering_angle  # Proportional control
+    def yaw_from_quaternion(self, x, y, z, w):
+        siny_cosp = 2 * (w * z + x * y)
+        cosy_cosp = 1 - 2 * (y * y + z * z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        return yaw
 
-        self.cmd_pub.publish(cmd_msg)
+    def pure_pursuit(self, current_x, current_y, current_heading, path, index, speed, lookahead_distance, forward=True):
+        closest_point = None
+        for i in range(index, len(path)):
+            x = path[i][0]
+            y = path[i][1]
+            distance = math.hypot(current_x - x, current_y - y)
+            if lookahead_distance < distance:
+                closest_point = (x, y)
+                index = i
+                break
+        if closest_point is not None:
+            # Calculate the lookahead point
+            lookahead_angle = math.atan2(closest_point[1] - current_y, closest_point[0] - current_x)
 
+            # Calculate the angle difference
+            angle_diff = lookahead_angle - current_heading
+            angle_diff = (angle_diff + math.pi) % (2 * math.pi) - math.pi  # Normalize to [-pi, pi]
+
+            # Decide the direction
+            forward = abs(angle_diff) < math.pi / 2
+
+            if forward:
+                v = speed  # Set the speed to a positive value to make the robot go forward
+            else:
+                v = -speed  # Set the speed to a negative value to make the robot go in reverse
+
+            if forward:
+                target_heading = math.atan2(closest_point[1] - current_y, closest_point[0] - current_x)
+            else:
+                target_heading = math.atan2(current_y - closest_point[1], current_x - closest_point[0])  # Reverse the atan2 arguments
+            desired_steering_angle = target_heading - current_heading
+        else:
+            if forward:
+                target_heading = math.atan2(path[-1][1] - current_y, path[-1][0] - current_x)
+            else:
+                target_heading = math.atan2(current_y - path[-1][1], current_x - path[-1][0])  # Reverse the atan2 arguments
+            desired_steering_angle = target_heading - current_heading
+            index = len(path) - 1
+
+            # Ensure v is assigned even if closest_point is None
+            v = speed if forward else -speed
+
+        if desired_steering_angle > math.pi:
+            desired_steering_angle -= 2 * math.pi
+        elif desired_steering_angle < -math.pi:
+            desired_steering_angle += 2 * math.pi
+        if desired_steering_angle > math.pi / 6 or desired_steering_angle < -math.pi / 6:
+            sign = 1 if desired_steering_angle > 0 else -1
+            desired_steering_angle = (sign * math.pi / 4)
+            v = 0.0
+        return v, desired_steering_angle, index
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = PurePursuit()
-    rclpy.spin(node)
+    rclpy.init()
+
+    controller = PurePursuitController()
+
+    rclpy.spin(controller)
+
+    controller.destroy_node()
     rclpy.shutdown()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
