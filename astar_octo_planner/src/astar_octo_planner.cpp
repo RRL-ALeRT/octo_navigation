@@ -57,8 +57,8 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   //const auto& mesh = mesh_map_->mesh();
   RCLCPP_INFO(node_->get_logger(), "start astar octo planner.");
 
-  RCLCPP_INFO(node_->get_logger(), "Start position: x = %f, y = %f, z = %f",
-                start.pose.position.x, start.pose.position.y, start.pose.position.z);
+  RCLCPP_INFO(node_->get_logger(), "Start position: x = %f, y = %f, z = %f, frame_id = %s",
+            start.pose.position.x, start.pose.position.y, start.pose.position.z, start.header.frame_id.c_str());
 
   uint32_t outcome;
   auto request = std::make_shared<astar_octo_msgs::srv::PlanPath::Request>();
@@ -91,7 +91,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
 
   std_msgs::msg::Header header;
   header.stamp = node_->now();
-  header.frame_id = "map";
+  header.frame_id = "odom";
 
   RCLCPP_INFO_STREAM(node_->get_logger(), "Path length: " << cost << "m");
   nav_msgs::msg::Path path_msg;
