@@ -4,6 +4,8 @@ from sensor_msgs.msg import PointCloud2
 from geometry_msgs.msg import PoseStamped
 from astar_octo_msgs.srv import PlanPath
 from sensor_msgs_py import point_cloud2
+from nav_msgs.msg import Path
+from octomap_msgs.msg import Octomap
 from std_srvs.srv import SetBool
 import numpy as np
 import heapq
@@ -25,6 +27,8 @@ class AStarPathPlanner(Node):
         pointcloud_topic = "/octomap_point_cloud_centers"
         self.sub_pc2 = self.create_subscription(PointCloud2, pointcloud_topic, self.pointcloud2_callback, 1)
         self.srv = self.create_service(PlanPath, 'plan_path', self.plan_path_callback)
+
+        self.path_publisher = self.create_publisher(Path, '/astar_path', 1)
 
     def world_to_grid(self, world_coords, min_bound, voxel_size):
         return tuple(
@@ -53,16 +57,23 @@ class AStarPathPlanner(Node):
 
             min_bound = voxel_grid.get_min_bound()
             max_bound = voxel_grid.get_max_bound()
+            self.get_logger().info(f"Voxel grid created, min bound: {min_bound}, max bound: {max_bound}")
             self.min_bound = deepcopy(min_bound)
+            grid_size_x = int((max_bound[0] - min_bound[0]) / VOXEL_SIZE) + 1
+            grid_size_y = int((max_bound[1] - min_bound[1]) / VOXEL_SIZE) + 1
+            grid_size_z = int((max_bound[2] - min_bound[2]) / VOXEL_SIZE) + 1
 
-            grid_size = ((max_bound - min_bound) / VOXEL_SIZE).astype(int) + 1
-            occupancy_grid = np.full(grid_size, -1, dtype=int)
-
+            #grid_size = ((max_bound - min_bound) / VOXEL_SIZE).astype(int) + 1
+            occupancy_grid = np.full((grid_size_x, grid_size_y, grid_size_z), -1, dtype=int)
             for voxel in voxel_grid.get_voxels():
-                x, y, z = voxel.grid_index
-                if 0 <= x < grid_size[0] and 0 <= y < grid_size[1] and 0 <= z < grid_size[2]:
-                    occupancy_grid[x, y, z] = 100
+                grid_index = voxel.grid_index
+                x, y, z = grid_index
 
+                # Ensure indices are within bounds
+                if 0 <= x < grid_size_x and 0 <= y < grid_size_y and 0 <= z < grid_size_z:
+                    occupancy_grid[x, y, z] = 100  # Mark the voxel as occupied
+
+            # Store the occupancy grid
             self.occupancy_grid = deepcopy(occupancy_grid)
         except Exception as e:
             self.get_logger().error(f"Error processing point cloud: {e}")
@@ -75,14 +86,13 @@ class AStarPathPlanner(Node):
         return tuple(nearest_index)
 
     def astar(self, start, goal):
-        self.get_logger().info(f"World Start: {start}, Grid Start: {self.world_to_grid(start, self.min_bound, VOXEL_SIZE)}")
-        self.get_logger().info(f"World Goal: {goal}, Grid Goal: {self.world_to_grid(goal, self.min_bound, VOXEL_SIZE)}")
         self.occupancy_array = self.occupancy_grid
         #start = self.world_to_grid(start, self.min_bound, VOXEL_SIZE)
         #goal = self.world_to_grid(goal, self.min_bound, VOXEL_SIZE)
-        self.get_logger().info(f"World Start: {start}, Grid Start: {self.world_to_grid(start, self.min_bound, VOXEL_SIZE)}")
-        self.get_logger().info(f"World Goal: {goal}, Grid Goal: {self.world_to_grid(goal, self.min_bound, VOXEL_SIZE)}")
-        start = self.find_nearest_3d_point(start[0], start[1], start[2], self.occupancy_grid)
+        self.get_logger().info(f"World Start: {start}")
+        self.get_logger().info(f"World Goal: {goal}")
+        #start = self.find_nearest_3d_point(start[0], start[1], start[2], self.occupancy_grid)
+        #goal = self.find_nearest_3d_point(goal[0], goal[1], goal[2], self.occupancy_grid)
         neighbors = [
             # 3D diagonals (corners) - prioritized first
             (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1),
@@ -147,7 +157,7 @@ class AStarPathPlanner(Node):
                 # Plan through occupied cells only
                 if self.occupancy_array[neighbor[0], neighbor[1], neighbor[2]] != 100:
                     self.get_logger().info(f"Neighbor {neighbor} is not occupied")
-                    #continue
+                    continue
 
                 # Check z constraint
                 if not self.is_within_z_constraint(current, neighbor):
@@ -230,11 +240,12 @@ class AStarPathPlanner(Node):
         self.get_logger().info(f"Start position: {start}")
         self.get_logger().info(f"Goal position: {goal}")
 
-        #path = self.astar(start, goal)
-        path = [start, goal]
+        path = self.astar(start, goal)
+        #path = [start, goal]
         if path:
             self.get_logger().info("Path found")
             response.plan = [self.create_pose_stamped(coord) for coord in path]
+            self.publish_path(path)
         else:
             self.get_logger().info("No path found")
             response.plan = []
@@ -251,6 +262,12 @@ class AStarPathPlanner(Node):
         pose_stamped.pose.orientation.w = 1.0  # Set a default orientation
         return pose_stamped
 
+    def publish_path(self, path):
+        path_msg = Path()
+        path_msg.header.frame_id = "odom"
+        path_msg.header.stamp = self.get_clock().now().to_msg()
+        path_msg.poses = [self.create_pose_stamped(coord) for coord in path]
+        self.path_publisher.publish(path_msg)
 
 def main(args=None):
     rclpy.init(args=args)
