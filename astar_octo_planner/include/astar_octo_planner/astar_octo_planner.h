@@ -40,6 +40,8 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/point.hpp>
+
 #include <astar_octo_msgs/srv/plan_path.hpp>
 
 #include <mbf_octo_core/octo_planner.h>
@@ -163,6 +165,14 @@ private:
   std::atomic_bool cancel_planning_;
   // publisher of resulting path
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr dsp_path_sub_;
+  void dsp_path_cb(const nav_msgs::msg::Path::SharedPtr msg);
+  nav_msgs::msg::Path::SharedPtr received_path_;
+
+  rclcpp::Publisher<geometry_msgs::msg::Point>::SharedPtr set_start_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::Point>::SharedPtr set_goal_pub_;
+
   // tf frame of the map
   std::string map_frame_;
   // handle of callback for changing parameters dynamically

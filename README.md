@@ -16,6 +16,20 @@ https://github.com/RRL-ALeRT/octomap_mapping
 webots spot mbf octo branch:
 https://github.com/MASKOR/webots_ros2_spot/tree/mbf_octo_nav
 
+## DSP
+
+https://github.com/LTU-RAI/Dsp/tree/ros2_msg
+
+    cd
+    git clone https://github.com/jhu-asco/dsl.git
+    cd dsl
+    git checkout 61cf588668309e87de209cd95f03a0f792a16c33
+    mkdir build
+    cd build
+    cmake ..
+    sudo make install
+
+If you face the assert error change 0 to nullptr.
 
 ### Building
 Clone octo_navigation: https://github.com/RRL-ALeRT/octo_navigation
@@ -32,7 +46,7 @@ Start in different terminals:
 
 `ros2 launch octomap_server octomap_webots_launch.py`
 
-`ros2 run make_plan_service path_planner`
+`ros2 run dsp dsp`
 
 `ros2 run pure_pursuit_controller path_to_vel`
 
@@ -76,6 +90,6 @@ OccupancyGrid: `/octomap_binary`
 
 Astar not finding correct path, fix: `make_plan_service/path_planner.py`
 
-Octo Controller does not stop when reaching goal, fix: `pure_pursuit_controller/path_to_vel.py`
+Octo Controller does not stop when reaching goal, fix: `pure_pursuit_controller/path_to_vel.py` and octo controller to inform each other if target reached
 
-Both based on: https://github.com/skpawar1305/easy_3D_navigation/blob/main/plan_3d_path.py
+DSP Path Planning: https://github.com/LTU-RAI/Dsp/tree/ros2_msg

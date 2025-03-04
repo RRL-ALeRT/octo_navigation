@@ -60,43 +60,57 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   RCLCPP_INFO(node_->get_logger(), "Start position: x = %f, y = %f, z = %f, frame_id = %s",
             start.pose.position.x, start.pose.position.y, start.pose.position.z, start.header.frame_id.c_str());
 
+  geometry_msgs::msg::Point start_pos;
+  start_pos.x = start.pose.position.x;
+  start_pos.y = start.pose.position.y;
+  start_pos.z = start.pose.position.z;
+
+  geometry_msgs::msg::Point goal_pos;
+  goal_pos.x = goal.pose.position.x;
+  goal_pos.y = goal.pose.position.y;
+  goal_pos.z = goal.pose.position.z;
+
+  set_start_pub_->publish(start_pos);
+  set_goal_pub_->publish(goal_pos);
+
   uint32_t outcome;
-  auto request = std::make_shared<astar_octo_msgs::srv::PlanPath::Request>();
-  request->start = start;
-  request->goal = goal;
-  while (!plan_path_client_->wait_for_service(std::chrono::seconds(1))) {
-    if (!rclcpp::ok()) {
-      RCLCPP_ERROR(node_->get_logger(), "Interrupted while waiting for the service. Exiting.");
+
+  rclcpp::Time start_time = node_->now();
+  rclcpp::Duration timeout(30, 0); // 15 seconds timeout
+
+  while (received_path_ == nullptr)
+  {
+    if ((node_->now() - start_time) > timeout)
+    {
+      RCLCPP_ERROR(node_->get_logger(), "Timeout waiting for path from DSP.");
       outcome = mbf_msgs::action::GetPath::Result::FAILURE;
+      return outcome;
     }
-    RCLCPP_INFO(node_->get_logger(), "Service not available, waiting again...");
+
+    RCLCPP_INFO(node_->get_logger(), "Waiting for path from DSP...");
+    rclcpp::sleep_for(std::chrono::milliseconds(100)); // Sleep for a short duration to avoid busy-waiting
   }
 
-    // Send the request and wait for the response
-  auto future = plan_path_client_->async_send_request(request);
-
-  auto response = future.get();
-  if (!response->plan.empty()) {
-    plan = response->plan;
-    cost = 1.0; // You can calculate the actual cost based on the plan
-    outcome = mbf_msgs::action::GetPath::Result::SUCCESS;
-  } else {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to call service plan_path");
-    outcome = mbf_msgs::action::GetPath::Result::FAILURE;
+  // Path received
+  RCLCPP_INFO(node_->get_logger(), "Received path from DSP.");
+  for (const auto& pose : received_path_->poses)
+  {
+    geometry_msgs::msg::PoseStamped pose_stamped;
+    pose_stamped.header = received_path_->header;
+    pose_stamped.pose = pose.pose;
+    plan.push_back(pose_stamped);
   }
-
-  // call dijkstra with the goal pose as seed / start vertex
-
-  //path.reverse();
+  received_path_ = nullptr;
+  cost = 1.0; // You can calculate the actual cost based on the plan
+  outcome = mbf_msgs::action::GetPath::Result::SUCCESS;
 
   std_msgs::msg::Header header;
   header.stamp = node_->now();
   header.frame_id = "odom";
 
-  RCLCPP_INFO_STREAM(node_->get_logger(), "Path length: " << cost << "m");
   nav_msgs::msg::Path path_msg;
   path_msg.poses = plan;
-  path_msg.header = header;
+  header.frame_id = start.header.frame_id; // Ensure the frame ID is set correctly
 
   path_pub_->publish(path_msg);
 
@@ -109,6 +123,12 @@ bool AstarOctoPlanner::cancel()
 {
   cancel_planning_ = true;
   return true;
+}
+
+
+void AstarOctoPlanner::dsp_path_cb(const nav_msgs::msg::Path::SharedPtr msg)
+{
+  received_path_ = msg;
 }
 
 bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::Node::SharedPtr& node)
@@ -130,6 +150,14 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
   }
 
   path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("~/path", rclcpp::QoS(1).transient_local());
+
+  set_start_pub_ = node_->create_publisher<geometry_msgs::msg::Point>("/dsp/set_start", rclcpp::QoS(1).transient_local());
+  set_goal_pub_ = node_->create_publisher<geometry_msgs::msg::Point>("/dsp/set_goal", rclcpp::QoS(1).transient_local());
+
+  dsp_path_sub_ = node_->create_subscription<nav_msgs::msg::Path>(
+    "/dsp/path", 10, std::bind(&AstarOctoPlanner::dsp_path_cb, this, std::placeholders::_1));
+
+
   plan_path_client_ = node_->create_client<astar_octo_msgs::srv::PlanPath>("/plan_path");
 
 
