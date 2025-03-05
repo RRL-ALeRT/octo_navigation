@@ -240,8 +240,8 @@ class AStarPathPlanner(Node):
         self.get_logger().info(f"Start position: {start}")
         self.get_logger().info(f"Goal position: {goal}")
 
-        path = self.astar(start, goal)
-        #path = [start, goal]
+        #path = self.astar(start, goal)
+        path = [start, goal]
         if path:
             self.get_logger().info("Path found")
             response.plan = [self.create_pose_stamped(coord) for coord in path]
