@@ -26,7 +26,6 @@ include_directories(
   include
 )
 
-find_package(LVR2 REQUIRED)
 find_package(MPI)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(JSONCPP jsoncpp)
@@ -43,8 +42,7 @@ add_library(mbf_octo_server
 )
 target_include_directories(mbf_octo_server PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-  ${LVR2_INCLUDE_DIRS})
+  $<INSTALL_INTERFACE:include>)
 ament_target_dependencies(mbf_octo_server ${dependencies})
 target_link_libraries(mbf_octo_server
   ${JSONCPP_LIBRARIES}
@@ -55,8 +53,7 @@ add_executable(${PROJECT_NAME} src/mbf_octo_nav.cpp)
 ament_target_dependencies(${PROJECT_NAME} ${dependencies} ${${PROJECT_NAME}_EXPORTED_TARGETS})
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-  ${LVR2_INCLUDE_DIRS})
+  $<INSTALL_INTERFACE:include>)
 target_link_libraries(${PROJECT_NAME}
   ${MPI_CXX_LIBRARIES}
   ${JSONCPP_LIBRARIES}
