@@ -16,11 +16,19 @@ https://github.com/RRL-ALeRT/octomap_mapping
 webots spot mbf octo branch:
 https://github.com/MASKOR/webots_ros2_spot/tree/mbf_octo_nav
 
-## DSP
+## DSL
+DSL is the required Library for for DSP ros2 path planning node.
 
-https://github.com/LTU-RAI/Dsp/tree/ros2_msg
+Clone this into ~/Programs. Its not part of a ros2_ws: https://github.com/RRL-ALeRT/dsl/tree/dsp_ros2
+    git clone https://github.com/RRL-ALeRT/dsl/tree/dsp_ros2
+    cd dsl
+    mkdir build
+    cd build
+    cmake ..
+    sudo make install
 
-    cd
+Alternatively:
+
     git clone https://github.com/jhu-asco/dsl.git
     cd dsl
     git checkout 61cf588668309e87de209cd95f03a0f792a16c33
@@ -30,6 +38,13 @@ https://github.com/LTU-RAI/Dsp/tree/ros2_msg
     sudo make install
 
 If you face the assert error change 0 to nullptr.
+
+
+## DSP
+  cd path/to/octo_nav_ws/src/octo_navigation
+  git clone git@github.com:RRL-ALeRT/Dsp.git
+  cd Dsp
+  git checkout ros2_msg
 
 ### Building
 Clone octo_navigation: https://github.com/RRL-ALeRT/octo_navigation
