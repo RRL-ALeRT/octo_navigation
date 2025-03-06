@@ -56,10 +56,12 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
 {
   //const auto& mesh = mesh_map_->mesh();
   RCLCPP_INFO(node_->get_logger(), "start astar octo planner.");
+  cancel_planning_ = false;
 
   RCLCPP_INFO(node_->get_logger(), "Start position: x = %f, y = %f, z = %f, frame_id = %s",
             start.pose.position.x, start.pose.position.y, start.pose.position.z, start.header.frame_id.c_str());
-
+  RCLCPP_INFO(node_->get_logger(), "Goal position: x = %f, y = %f, z = %f, frame_id = %s",
+            goal.pose.position.x, goal.pose.position.y, goal.pose.position.z, goal.header.frame_id.c_str());
   geometry_msgs::msg::Point start_pos;
   start_pos.x = start.pose.position.x;
   start_pos.y = start.pose.position.y;
@@ -76,7 +78,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   uint32_t outcome;
 
   rclcpp::Time start_time = node_->now();
-  rclcpp::Duration timeout(30, 0); // 15 seconds timeout
+  rclcpp::Duration timeout(200, 0); // 15 seconds timeout
 
   while (received_path_ == nullptr)
   {
@@ -86,9 +88,15 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
       outcome = mbf_msgs::action::GetPath::Result::FAILURE;
       return outcome;
     }
+    if (cancel_planning_)
+    {
+      RCLCPP_INFO(node_->get_logger(), "Canceling planning...");
+      outcome = mbf_msgs::action::GetPath::Result::CANCELED;
+      return outcome;
+    }
 
     RCLCPP_INFO(node_->get_logger(), "Waiting for path from DSP...");
-    rclcpp::sleep_for(std::chrono::milliseconds(100)); // Sleep for a short duration to avoid busy-waiting
+    rclcpp::sleep_for(std::chrono::milliseconds(1000)); // Sleep for a short duration to avoid busy-waiting
   }
 
   // Path received
@@ -122,6 +130,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
 bool AstarOctoPlanner::cancel()
 {
   cancel_planning_ = true;
+  received_path_ = nullptr;
   return true;
 }
 
