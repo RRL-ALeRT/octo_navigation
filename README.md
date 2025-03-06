@@ -40,18 +40,16 @@ Alternatively:
 
 If you face the assert error change 0 to nullptr.
 
-
-## DSP
-
-    cd path/to/octo_nav_ws/src/octo_navigation
-    git clone git@github.com:RRL-ALeRT/Dsp.git
-    cd Dsp
-    git checkout ros2_msg
-
 ### Building
-Clone octo_navigation: https://github.com/RRL-ALeRT/octo_navigation
-and
-mbf and in one workspace and colcon build.
+Clone octo_navigation with submodules:
+
+    git clone --recurse-submodules git@github.com:RRL-ALeRT/octo_navigation.git
+
+if already cloned:
+
+    git submodule update --init --recursive
+
+Clone mbf and `octomap_mapping` in ~/octo_nav_ws/src/ and colcon build.
 
 ## Start
 
@@ -105,8 +103,8 @@ If you want to see the octomap:
 OccupancyGrid: `/octomap_binary`
 ## Issues
 
-Astar not finding correct path, fix: `make_plan_service/path_planner.py`
-
-Octo Controller does not stop when reaching goal, fix: `pure_pursuit_controller/path_to_vel.py` and octo controller to inform each other if target reached
+D* of DSP is for UAV. Need support for UGV.
 
 DSP Path Planning: https://github.com/LTU-RAI/Dsp/tree/ros2_msg
+
+D*+: A Risk Aware Platform Agnostic Heterogeneous Path Planner: https://arxiv.org/pdf/2112.05563
