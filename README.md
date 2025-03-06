@@ -21,7 +21,7 @@ DSL is the required Library for for DSP ros2 path planning node.
 
 Clone this into ~/Programs. Its not part of a ros2_ws: https://github.com/RRL-ALeRT/dsl/tree/dsp_ros2
 
-    git clone https://github.com/RRL-ALeRT/dsl/tree/dsp_ros2
+    git clone -b "dsp_ros2" git@github.com:RRL-ALeRT/dsl.git
     cd dsl
     mkdir build
     cd build
@@ -42,10 +42,11 @@ If you face the assert error change 0 to nullptr.
 
 
 ## DSP
-  cd path/to/octo_nav_ws/src/octo_navigation
-  git clone git@github.com:RRL-ALeRT/Dsp.git
-  cd Dsp
-  git checkout ros2_msg
+
+    cd path/to/octo_nav_ws/src/octo_navigation
+    git clone git@github.com:RRL-ALeRT/Dsp.git
+    cd Dsp
+    git checkout ros2_msg
 
 ### Building
 Clone octo_navigation: https://github.com/RRL-ALeRT/octo_navigation
