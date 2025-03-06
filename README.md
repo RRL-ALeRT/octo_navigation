@@ -20,6 +20,7 @@ https://github.com/MASKOR/webots_ros2_spot/tree/mbf_octo_nav
 DSL is the required Library for for DSP ros2 path planning node.
 
 Clone this into ~/Programs. Its not part of a ros2_ws: https://github.com/RRL-ALeRT/dsl/tree/dsp_ros2
+
     git clone https://github.com/RRL-ALeRT/dsl/tree/dsp_ros2
     cd dsl
     mkdir build
