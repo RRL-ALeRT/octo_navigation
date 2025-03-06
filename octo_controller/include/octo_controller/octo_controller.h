@@ -38,6 +38,7 @@
 #include <mbf_octo_core/octo_controller.h>
 #include <mbf_msgs/action/get_path.hpp>
 #include <example_interfaces/msg/float32.hpp>
+#include <example_interfaces/msg/bool.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
 namespace octo_controller
@@ -130,6 +131,9 @@ private:
 
   //! publishes the angle between the robots orientation and the goal vector field for debug purposes
   rclcpp::Publisher<example_interfaces::msg::Float32>::SharedPtr angle_pub_;
+  rclcpp::Subscription<example_interfaces::msg::Bool>::SharedPtr goal_reached_sub_;
+  void goal_reached_cb(const example_interfaces::msg::Bool::SharedPtr msg);
+  std::atomic_bool goal_reached_;
 
   //! flag to handle cancel requests
   std::atomic_bool cancel_requested_;
