@@ -184,6 +184,9 @@ private:
   bool isWithinBounds(const std::tuple<int, int, int>& pt);
   bool isWithinBounds(const geometry_msgs::msg::Point & pt);
   bool isOccupied(const std::tuple<int, int, int>& pt);
+  bool hasNoOccupiedCellsAbove(const std::tuple<int, int, int>& coord, 
+                                                double vertical_min, double vertical_range);
+  bool isCylinderCollisionFree(const std::tuple<int, int, int>& coord, double radius);
   std::vector<std::tuple<int, int, int>> astar(const std::tuple<int, int, int>& start,
                                                const std::tuple<int, int, int>& goal);
 
@@ -198,6 +201,9 @@ private:
   // Voxel grid parameters.
   double voxel_size_;
   double z_threshold_;
+  double robot_radius_ = 0.35;
+  double min_vertical_clearance_ = 0.4;
+  double max_vertical_clearance_ = 0.6;
 
   // Minimum bound for the occupancy grid.
   std::array<double, 3> min_bound_;

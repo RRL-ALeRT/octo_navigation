@@ -68,10 +68,5 @@ PointCloud2: `/octomap_point_cloud_centers`
 Path: `/move_base_flex/path`
 If you want to see the octomap:
 OccupancyGrid: `/octomap_binary`
-## Issues
 
-Astar not finding correct path, fix: `make_plan_service/path_planner.py`
-
-Octo Controller does not stop when reaching goal, fix: `pure_pursuit_controller/path_to_vel.py`
-
-Both based on: https://github.com/skpawar1305/easy_3D_navigation/blob/main/plan_3d_path.py
+Based on: https://github.com/skpawar1305/easy_3D_navigation/blob/main/plan_3d_path.py

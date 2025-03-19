@@ -69,7 +69,7 @@ struct GridNode {
 };
 
 AstarOctoPlanner::AstarOctoPlanner()
-: voxel_size_(0.2),  // double than that of octomap resolution
+: voxel_size_(0.1),  // double than that of octomap resolution
   z_threshold_(0.3)   // same as Z_THRESHOLD in Python
 {
   // The occupancy grid will be populated by the point cloud callback.
@@ -227,6 +227,50 @@ bool AstarOctoPlanner::isOccupied(const std::tuple<int, int, int>& pt)
   return occupancy_grid_[x][y][z] == 100;
 }
 
+bool AstarOctoPlanner::hasNoOccupiedCellsAbove(const std::tuple<int, int, int>& coord, 
+                                               double vertical_min, double vertical_range)
+{
+  int x, y, z;
+  std::tie(x, y, z) = coord;
+
+  int z_min = z + static_cast<int>(vertical_min / voxel_size_);
+  int z_max = z + static_cast<int>(vertical_range / voxel_size_);
+
+  for (int z_check = z_min; z_check <= z_max; ++z_check) {
+    if (isWithinBounds({x, y, z_check}) && isOccupied({x, y, z_check})) {
+      return false; // Found an occupied cell
+    }
+  }
+  return true; // No occupied cells found above
+}
+
+bool AstarOctoPlanner::isCylinderCollisionFree(const std::tuple<int, int, int>& coord, double radius) 
+{
+  int x, y, z;
+  std::tie(x, y, z) = coord;
+
+  double grid_radius = radius / voxel_size_;
+  int grid_z_start = static_cast<int>(0.4 / voxel_size_);
+  int grid_z_end = static_cast<int>(0.6 / voxel_size_);
+
+  int num_points = static_cast<int>(2 * M_PI * grid_radius);
+
+  for (int angle = 0; angle < num_points; angle += 2) {
+    double theta = 2 * M_PI * angle / num_points;
+    int i = static_cast<int>(std::round(grid_radius * std::cos(theta)));
+    int j = static_cast<int>(std::round(grid_radius * std::sin(theta)));
+
+    for (int k = grid_z_start; k <= grid_z_end; k += 2) {
+      std::tuple<int, int, int> check_coord = {x + i, y + j, z + k};
+
+      if (isWithinBounds(check_coord) && isOccupied(check_coord)) {
+        return false; // Collision detected
+      }
+    }
+  }
+  return true; // No collision
+}
+
 std::vector<std::tuple<int, int, int>> AstarOctoPlanner::astar(const std::tuple<int, int, int>& start,
                                                                 const std::tuple<int, int, int>& goal)
 {
@@ -262,7 +306,6 @@ std::vector<std::tuple<int, int, int>> AstarOctoPlanner::astar(const std::tuple<
     open_set.pop();
 
     if (current.coord == goal) {
-      // Reconstruct the path.
       std::vector<std::tuple<int, int, int>> path;
       auto node = current.coord;
       while (came_from.find(node) != came_from.end()) {
@@ -284,10 +327,11 @@ std::vector<std::tuple<int, int, int>> AstarOctoPlanner::astar(const std::tuple<
 
       if (!isWithinBounds(neighbor))
         continue;
+
       if (!isOccupied(neighbor))
         continue;
 
-      // Check z-axis constraint (step height)
+      // Check if neighbor is within certain Z distance
       int current_z, neighbor_z;
       std::tie(std::ignore, std::ignore, current_z) = current.coord;
       std::tie(std::ignore, std::ignore, neighbor_z) = neighbor;
@@ -296,12 +340,14 @@ std::vector<std::tuple<int, int, int>> AstarOctoPlanner::astar(const std::tuple<
       if (z_diff > z_constraint)
         continue;
 
+      if (!isCylinderCollisionFree(neighbor, robot_radius_))
+        continue;
+
+      if (!hasNoOccupiedCellsAbove(neighbor, min_vertical_clearance_, max_vertical_clearance_))
+        continue;
+
       double tentative_g = current.g + heuristic(current.coord, neighbor);
       if (g_score.find(neighbor) == g_score.end() || tentative_g < g_score[neighbor]) {
-        // RCLCPP_INFO(node_->get_logger(),
-        //             "Updating neighbor (%d, %d, %d): g=%f",
-        //             std::get<0>(neighbor), std::get<1>(neighbor), std::get<2>(neighbor),
-        //             tentative_g);
         came_from[neighbor] = current.coord;
         g_score[neighbor] = tentative_g;
         double f = tentative_g + heuristic(neighbor, goal);
@@ -327,7 +373,7 @@ void AstarOctoPlanner::pointcloud2Callback(const sensor_msgs::msg::PointCloud2::
   // Get raw point cloud bounds
   pcl::PointXYZ min_pt, max_pt;
   pcl::getMinMax3D(*cloud, min_pt, max_pt);
-  RCLCPP_INFO(node_->get_logger(),
+  RCLCPP_INFO_ONCE(node_->get_logger(),
               "Raw Cloud Bounds: Min [%f, %f, %f], Max [%f, %f, %f]",
               min_pt.x, min_pt.y, min_pt.z, max_pt.x, max_pt.y, max_pt.z);
 
