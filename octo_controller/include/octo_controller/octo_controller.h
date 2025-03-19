@@ -83,6 +83,18 @@ public:
    */
   virtual bool isGoalReached(double dist_tolerance, double angle_tolerance) override;
 
+  std::tuple<double, double, int> purePursuit(
+      double current_x,
+      double current_y,
+      double current_heading,
+      const std::vector<geometry_msgs::msg::PoseStamped> & path,
+      int index,
+      double speed,
+      double lookahead_distance,
+      bool forward);
+
+  int pursuit_index_;
+
   /**
    * @brief Sets the current plan to follow, it also sets the vector field
    * @param plan The plan to follow
@@ -136,9 +148,6 @@ private:
 
   // handle of callback for changing parameters dynamically
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr reconfiguration_callback_handle_;
-
-  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr pure_pursuit_vel_sub_;
-  void pp_vel_cb(const geometry_msgs::msg::Twist::SharedPtr msg);
 
   geometry_msgs::msg::Twist::SharedPtr received_twist_;
 

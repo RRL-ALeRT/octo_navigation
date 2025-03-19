@@ -32,10 +32,6 @@ Start in different terminals:
 
 `ros2 launch octomap_server octomap_webots_launch.py`
 
-`ros2 run make_plan_service path_planner`
-
-`ros2 run pure_pursuit_controller path_to_vel`
-
 `rviz`
 
 ### Send a Goal
