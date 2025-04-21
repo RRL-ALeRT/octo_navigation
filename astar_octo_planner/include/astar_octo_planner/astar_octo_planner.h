@@ -35,17 +35,15 @@
  *
  */
 
-#ifndef OCTO_NAVIGATION__dijkstra_octo_planner_H
-#define OCTO_NAVIGATION__DIJKSTRA_OCTO_PLANNER_H
+#ifndef OCTO_NAVIGATION__ASTAR_OCTO_PLANNER_H
+#define OCTO_NAVIGATION__ASTAR_OCTO_PLANNER_H
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
-#include <astar_octo_msgs/srv/plan_path.hpp>
-
+#include <nav_msgs/msg/path.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <mbf_octo_core/octo_planner.h>
 #include <mbf_msgs/action/get_path.hpp>
-#include <nav_msgs/msg/path.hpp>
-
 
 namespace astar_octo_planner
 {
@@ -168,7 +166,6 @@ private:
   // handle of callback for changing parameters dynamically
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr reconfiguration_callback_handle_;
   // config determined by ROS params; Init values defined here are used as default ROS param value
-  rclcpp::Client<astar_octo_msgs::srv::PlanPath>::SharedPtr plan_path_client_;
   struct {
     // publisher of resulting vector fiels
     bool publish_vector_field = false;
@@ -179,8 +176,48 @@ private:
     // defines the vertex cost limit with which it can be accessed
     double cost_limit = 1.0;
   } config_;
+
+  // Utility functions.
+  geometry_msgs::msg::Point find_nearest_3d_point(geometry_msgs::msg::Point point, const std::vector<std::vector<std::vector<int>>>& array_3d);
+  geometry_msgs::msg::Point worldToGrid(const geometry_msgs::msg::Point & point);
+  std::array<double, 3> gridToWorld(const std::tuple<int, int, int>& grid_pt);
+  bool isWithinBounds(const std::tuple<int, int, int>& pt);
+  bool isWithinBounds(const geometry_msgs::msg::Point & pt);
+  bool isOccupied(const std::tuple<int, int, int>& pt);
+  bool hasNoOccupiedCellsAbove(const std::tuple<int, int, int>& coord, 
+                                                double vertical_min, double vertical_range);
+  bool isCylinderCollisionFree(const std::tuple<int, int, int>& coord, double radius);
+  std::vector<std::tuple<int, int, int>> astar(const std::tuple<int, int, int>& start,
+                                               const std::tuple<int, int, int>& goal);
+
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
+
+  // Callback for point cloud subscription.
+  void pointcloud2Callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
+
+  // Occupancy grid represented as a 3D vector.
+  std::vector<std::vector<std::vector<int>>> occupancy_grid_;
+
+  // Voxel grid parameters.
+  double voxel_size_;
+  double z_threshold_;
+  double robot_radius_ = 0.35;
+  double min_vertical_clearance_ = 0.4;
+  double max_vertical_clearance_ = 0.6;
+
+  // Minimum bound for the occupancy grid.
+  std::array<double, 3> min_bound_;
+
+  // Hash function for tuple<int, int, int> to track unique occupied voxels
+  struct TupleHash {
+    template <typename T1, typename T2, typename T3>
+    std::size_t operator()(const std::tuple<T1, T2, T3>& t) const {
+      auto [a, b, c] = t;
+      return std::hash<T1>()(a) ^ std::hash<T2>()(b) ^ std::hash<T3>()(c);
+    }
+  };
 };
 
-}  // namespace dijkstra_octo_planner
+}  // namespace astar_octo_planner
 
 #endif  // OCTO_NAVIGATION__ASTAR_OCTO_PLANNER_H

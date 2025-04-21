@@ -12,7 +12,6 @@
     <depend>mbf_utility</depend>
     <depend>mbf_msgs</depend>
     <depend>pluginlib</depend>
-    <depend>astar_octo_msgs</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

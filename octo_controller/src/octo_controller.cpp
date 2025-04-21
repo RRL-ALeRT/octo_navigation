@@ -66,26 +66,121 @@ uint32_t OctoController::computeVelocityCommands(const geometry_msgs::msg::PoseS
                                                  geometry_msgs::msg::TwistStamped& cmd_vel,
                                                  std::string& message)
 {
-
-  std::array<float, 2> velocities;
+  // Update the current pose.
   current_pose_ = pose;
-  if (received_twist_){
 
-    velocities[0] = received_twist_->linear.x;
-    velocities[1] = received_twist_->angular.z;
-    cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, velocities[0] * config_.lin_vel_factor);
-    cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, velocities[1] * config_.ang_vel_factor);
-    cmd_vel.header.stamp = node_->now();
-  }
+  // Extract current position from the pose.
+  double current_x = pose.pose.position.x;
+  double current_y = pose.pose.position.y;
+  
+  // Compute the robot's yaw angle from the quaternion.
+  double qx = pose.pose.orientation.x;
+  double qy = pose.pose.orientation.y;
+  double qz = pose.pose.orientation.z;
+  double qw = pose.pose.orientation.w;
+  double current_heading = std::atan2(2.0 * (qw * qz + qx * qy),
+                                     1.0 - 2.0 * (qy * qy + qz * qz));
 
+  // Call the pure pursuit function.
+  double linear_vel = 0.0;
+  double angular_vel = 0.0;
+  int new_index = pursuit_index_;
+  std::tie(linear_vel, angular_vel, new_index) =
+      purePursuit(current_x, current_y, current_heading,
+                  current_plan_, pursuit_index_,
+                  config_.max_lin_velocity, config_.max_search_distance, true);
 
-  if (cancel_requested_)
-  {
+  pursuit_index_ = new_index;
+
+  // Use the computed velocities.
+  cmd_vel.twist.linear.x = linear_vel;
+  cmd_vel.twist.angular.z = angular_vel;
+  cmd_vel.header.stamp = node_->now();
+
+  if (cancel_requested_) {
     return mbf_msgs::action::ExePath::Result::CANCELED;
   }
   return mbf_msgs::action::ExePath::Result::SUCCESS;
 }
 
+// Signature: returns {v, desired_steering_angle, new_index}
+std::tuple<double, double, int> OctoController::purePursuit(
+    double current_x,
+    double current_y,
+    double current_heading,
+    const std::vector<geometry_msgs::msg::PoseStamped> & path,
+    int index,
+    double speed,
+    double lookahead_distance,
+    bool forward)
+{
+    bool found = false;
+    std::pair<double, double> closest_point;
+
+    // Search for a point in the path that is farther than the lookahead distance.
+    for (int i = index; i < static_cast<int>(path.size()); i++) {
+        double x = path[i].pose.position.x;
+        double y = path[i].pose.position.y;
+        double distance = std::hypot(current_x - x, current_y - y);
+        if (lookahead_distance < distance) {
+            closest_point = {x, y};
+            index = i;
+            found = true;
+            break;
+        }
+    }
+
+    double v;
+    double desired_steering_angle;
+    if (found) {
+        // Calculate the lookahead angle
+        double lookahead_angle = std::atan2(closest_point.second - current_y,
+                                            closest_point.first - current_x);
+        // Compute angle difference and normalize it to [-pi, pi]
+        double angle_diff = lookahead_angle - current_heading;
+        angle_diff = std::fmod(angle_diff + M_PI, 2 * M_PI) - M_PI;
+
+        // Decide the direction based on the angle difference @skpawar1305?
+        // forward = (std::abs(angle_diff) < M_PI / 2);
+        v = forward ? speed : -speed;
+
+        double target_heading;
+        if (forward) {
+            target_heading = std::atan2(closest_point.second - current_y,
+                                        closest_point.first - current_x);
+        } else {
+            target_heading = std::atan2(current_y - closest_point.second,
+                                        current_x - closest_point.first);
+        }
+        desired_steering_angle = target_heading - current_heading;
+    } else {
+        // If no suitable point is found, use the last point in the path.
+        double target_heading;
+        if (forward) {
+            target_heading = std::atan2(path.back().pose.position.y - current_y, path.back().pose.position.x - current_x);
+        } else {
+            target_heading = std::atan2(current_y - path.back().pose.position.y, current_x - path.back().pose.position.x);
+        }
+        desired_steering_angle = target_heading - current_heading;
+        index = path.size() - 1;
+        v = forward ? speed : -speed;
+    }
+
+    // Normalize desired_steering_angle to the range [-pi, pi]
+    if (desired_steering_angle > M_PI) {
+        desired_steering_angle -= 2 * M_PI;
+    } else if (desired_steering_angle < -M_PI) {
+        desired_steering_angle += 2 * M_PI;
+    }
+
+    // If the steering angle is too large, limit it and set velocity to zero.
+    if (desired_steering_angle > M_PI / 6 || desired_steering_angle < -M_PI / 6) {
+        int sign = (desired_steering_angle > 0) ? 1 : -1;
+        desired_steering_angle = sign * (M_PI / 4);
+        v = 0.0;
+    }
+    return std::make_tuple(v, desired_steering_angle, index);
+}
 
 bool OctoController::isGoalReached(double dist_tolerance, double angle_tolerance)
 {
@@ -106,10 +201,8 @@ bool OctoController::setPlan(const std::vector<geometry_msgs::msg::PoseStamped>&
   current_plan_ = plan;
   goal_pos_ = current_plan_.back(); // Store the goal position
   cancel_requested_ = false;
+  pursuit_index_ = 0;
   return true;
-}
-void OctoController::pp_vel_cb(const geometry_msgs::msg::Twist::SharedPtr msg) {
-    received_twist_ = msg;
 }
 
 bool OctoController::cancel()
@@ -231,9 +324,6 @@ bool OctoController::initialize(const std::string& plugin_name,
 
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(std::bind(
       &OctoController::reconfigureCallback, this, std::placeholders::_1));
-
-  pure_pursuit_vel_sub_ = node_->create_subscription<geometry_msgs::msg::Twist>(
-    "/pp_vel", 10, std::bind(&OctoController::pp_vel_cb, this, std::placeholders::_1));
 
   return true;
 }
