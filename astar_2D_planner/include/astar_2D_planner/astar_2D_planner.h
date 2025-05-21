@@ -45,6 +45,11 @@
 #include <mbf_octo_core/octo_planner.h>
 #include <mbf_msgs/action/get_path.hpp>
 
+#include <nav_msgs/msg/occupancy_grid.hpp>  // OccupancyGrid
+#include <unordered_map>                    // A*
+#include <array>
+#include <cmath>
+
 namespace astar_2D_planner
 {
 
@@ -176,6 +181,25 @@ private:
     // defines the vertex cost limit with which it can be accessed
     double cost_limit = 1.0;
   } config_;
+
+  double map_resolution_{0.1};
+  double origin_x_{0.0}, origin_y_{0.0};
+  std::vector<std::vector<int8_t>> occ_grid_;
+  size_t width_{0}, height_{0};                // grid size
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
+  /* ==== Function ==== */
+  inline std::pair<int,int> worldToGrid(double wx, double wy) const;
+  inline std::array<double,2> gridToWorld(int gx, int gy) const;
+  std::vector<std::pair<int,int>>
+      astar(const std::pair<int,int>& start,
+            const std::pair<int,int>& goal);
+  void mapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+  void goalPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
+  rclcpp_action::Client<mbf_msgs::action::MoveBase>::SharedPtr      mbf_client_;
+
+  
   // Utility functions of the 3D Planner.
   // // Callback for point cloud subscription.
   // void pointcloud2Callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);

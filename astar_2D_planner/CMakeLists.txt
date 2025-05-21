@@ -22,9 +22,19 @@ target_include_directories(${PROJECT_NAME} PUBLIC
   ${pluginlib_INCLUDE_DIRS}
 )
 target_compile_definitions(${PROJECT_NAME} PRIVATE "ASTAR_2D_PLANNER_BUILDING_LIBRARY")
-ament_target_dependencies(${PROJECT_NAME} mbf_octo_core mbf_msgs mbf_utility rclcpp pluginlib sensor_msgs)
-target_link_libraries(${PROJECT_NAME}
-    ${MPI_CXX_LIBRARIES}
+ament_target_dependencies(${PROJECT_NAME} 
+  mbf_octo_core 
+  mbf_msgs 
+  mbf_utility 
+  rclcpp 
+  pluginlib 
+  sensor_msgs
+  rclcpp
+  geometry_msgs
+  nav_msgs
+  mbf_msgs)
+  target_link_libraries(${PROJECT_NAME}
+      ${MPI_CXX_LIBRARIES}
 )
 
 install(DIRECTORY include/
