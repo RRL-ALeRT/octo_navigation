@@ -178,16 +178,16 @@ private:
   } config_;
   // Utility functions of the 3D Planner.
   // // Callback for point cloud subscription.
-  // void pointcloud2Callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
- // rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
+  void pointcloud2Callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
    // Occupancy grid represented as a 3D vector.
-  // std::vector<std::vector<std::vector<int>>> occupancy_grid_;
+  std::vector<std::vector<std::vector<int>>> occupancy_grid_;
   // geometry_msgs::msg::Point find_nearest_3d_point(geometry_msgs::msg::Point point, const std::vector<std::vector<std::vector<int>>>& array_3d);
-  // geometry_msgs::msg::Point worldToGrid(const geometry_msgs::msg::Point & point);
-  // std::array<double, 3> gridToWorld(const std::tuple<int, int, int>& grid_pt);
+  geometry_msgs::msg::Point worldToGrid(const geometry_msgs::msg::Point & point);
+  std::array<double, 3> gridToWorld(const std::tuple<int, int, int>& grid_pt);
   // bool isWithinBounds(const std::tuple<int, int, int>& pt);
   // bool isWithinBounds(const geometry_msgs::msg::Point & pt);
-  // bool isOccupied(const std::tuple<int, int, int>& pt);
+  bool isOccupied(const std::tuple<int, int, int>& pt);
   // bool hasNoOccupiedCellsAbove(const std::tuple<int, int, int>& coord,
   //                                               double vertical_min, double vertical_range);
   // bool isCylinderCollisionFree(const std::tuple<int, int, int>& coord, double radius);

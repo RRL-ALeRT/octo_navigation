@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.8)
 project(astar_2D_planner)
 
+set (CMAKE_CXX_STANDARD 20)
+
 find_package(ament_cmake_ros REQUIRED)
 find_package(mbf_octo_core REQUIRED)
 find_package(mbf_msgs REQUIRED)
