@@ -65,6 +65,7 @@ namespace astar_2D_planner
 
 // Structure for A* search nodes in the grid.
 struct GridNode {
+public:
   std::tuple<int, int> coord;
   double f;  // f-score = g + h
   double g;  // cost from start to this node
@@ -75,6 +76,7 @@ struct GridNode {
     return f > other.f;
   }
 
+  GridNode() {}
   GridNode(std::tuple<int, int> coord, double f, double g, std::tuple<int, int> prev, bool visited) : coord(coord), f(f), g(g), prev(prev), visited(visited) {}
 };
 
@@ -97,6 +99,7 @@ bool Astar2DPlanner::isOccupied(const std::tuple<int, int, int>& pt)
   std::tie(x, y, z) = pt;
   // In this example an occupied voxel is marked with the value 100.
   return occupancy_grid_[x][y][z] == 100;
+  //return false;
 }
 
 geometry_msgs::msg::Point Astar2DPlanner::worldToGrid(const geometry_msgs::msg::Point& point)
@@ -134,8 +137,10 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
   geometry_msgs::msg::Point start_grid = worldToGrid(start.pose.position);
   geometry_msgs::msg::Point goal_grid = worldToGrid(goal.pose.position);
 
-  int grid_size_x = std::round(std::abs(goal_grid.x - start_grid.x));
-  int grid_size_y = std::round(std::abs(goal_grid.y - start_grid.y));
+  RCLCPP_INFO(node_->get_logger(), "Start position after conversion: start_x = %f, start_y = %f, goal_x = %f, goal_y = %f", start_grid.x, start_grid.y, goal_grid.x, goal_grid.y);
+
+  int grid_size_x = std::floor(std::abs(goal_grid.x - start_grid.x)) + 1;
+  int grid_size_y = std::floor(std::abs(goal_grid.y - start_grid.y)) + 1;
   int grid_bottom_left_x = std::round(std::min(start_grid.x, goal_grid.x));
   int grid_bottom_left_y = std::round(std::min(start_grid.y, goal_grid.y));
   int nrGridNodes = grid_size_x*grid_size_y;
@@ -143,6 +148,8 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
   int start_y = std::round(start_grid.y);
   int goal_x = std::round(goal_grid.x);
   int goal_y = std::round(goal_grid.y);
+  
+  RCLCPP_INFO(node_->get_logger(), "GridSize x: %i, GridSize y: %i", grid_size_x, grid_size_y);
 
   std::vector<std::vector<GridNode>> grid;
   grid.reserve(grid_size_x);
@@ -158,10 +165,23 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
       column.emplace_back(GridNode(std::tuple<int, int>(grid_bottom_left_x + x, grid_bottom_left_y + y), std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(), std::tuple<int, int>(grid_bottom_left_x + x, grid_bottom_left_y + y), false));
       gridOrder[y+grid_size_y*x] = std::tuple(x, y);
     }
-    grid[x] = column;
+    grid.emplace_back(column);
   }
 
-  //Initialize starting node
+  RCLCPP_INFO(node_->get_logger(), "init grid: start_x = %i, start_y = %i", start_x, start_y);
+  RCLCPP_INFO(node_->get_logger(), "grid empty?: %i", (int)grid.empty());
+  RCLCPP_INFO(node_->get_logger(), "size: %i", (int)grid.size());
+  
+  RCLCPP_INFO(node_->get_logger(), "node(0, 0) f: %f", grid.at(0).at(0).f);
+  RCLCPP_INFO(node_->get_logger(), "Inner size: %i", (int)grid[0].size());
+  
+  /*for(const auto& column : grid) {
+  	for(const auto & node : column) {
+  		RCLCPP_INFO(node_->get_logger(), "node= (x: %i, y: %i, f: %f, g: %f, prevX: %i, prevY: %i, visited: %i)", get<0>(node.coord), get<1>(node.coord), node.f, node.g, get<0>(node.prev), get<1>(node.prev), (int)node.visited);
+  	}
+  }*/
+
+  //Initialize starting node <-- SIGSEGV
   grid[start_x][start_y].f = 0.0;
   grid[start_x][start_y].g = 0.0;
   grid[start_x][start_y].prev = std::tuple<int, int>(start_x, start_y);
@@ -172,22 +192,30 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
   std::get<0>(gridOrder[0]) = start_x;
   std::get<1>(gridOrder[0]) = start_y;
   
+  RCLCPP_INFO(node_->get_logger(), "isOccupied(0,0) = %i", (int)isOccupied(std::tuple<int, int, int>(0, 0, 0)));
+  
   for(int vIndex = 0; vIndex<nrGridNodes; vIndex++) {
     //TODO: If goal not reached, double grid_size_x,y and add everything outside old grid_size and add all the nodes at the edges to the queue
     
-    GridNode* current = &grid[std::get<0>(gridOrder[vIndex])][std::get<0>(gridOrder[vIndex])];
+    GridNode* current = &grid[std::get<0>(gridOrder[vIndex])][std::get<1>(gridOrder[vIndex])];
     current->visited = true;
+
+     RCLCPP_INFO(node_->get_logger(), "Current node: x = %i, y = %i, g=%f, vIndex=%i, gridOrderX=%i, gridOrderY=%i", get<0>(current->coord), get<1>(current->coord), current->g, vIndex, std::get<0>(gridOrder[vIndex]), std::get<1>(gridOrder[vIndex]));
     
 
     if(std::get<0>(current->coord) == goal_x && std::get<1>(current->coord) == goal_y) {
       RCLCPP_ERROR(node_->get_logger(), "Goal reached. Terminating search...");
       break;
     }
+    
+    //RCLCPP_INFO(node_->get_logger(), "After break");
 
     for(int x = -1; x<=1; x++) { //Get all 8 grid neighbours
       for(int y = -1; y<=1; y++) {
-        if(grid[std::get<0>(current->coord)+x][std::get<1>(current->coord)+y].visited || isOccupied(std::tuple<int, int, int>(std::get<0>(current->coord)+x, std::get<1>(current->coord)+y, 0))) {
-          continue; // neighbour not in unvisited or neighbour is occupied
+        //RCLCPP_INFO(node_->get_logger(), "x = %i, y = %i", x, y);
+        if(get<0>(current->coord) + x < 0 || get<1>(current->coord) + y < 0 || std::get<0>(current->coord) + x >= grid_size_x || std::get<1>(current->coord) + y >= grid_size_y || grid[std::get<0>(current->coord)+x][std::get<1>(current->coord)+y].visited || isOccupied(std::tuple<int, int, int>(std::get<0>(current->coord)+x, std::get<1>(current->coord)+y, 0))) {
+          //RCLCPP_INFO(node_->get_logger(), "Continue"); // crash at (1, 0) in isOccupied
+          continue; // neighbour not in unvisited or neighbour is occupied or part of border
         }
 
         double newF = current->g + std::sqrt(x*x + y*y); // dist(current) + cost(current, neighbour)
@@ -203,15 +231,26 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
           //Sort gridOrder, by moving the neigbour down until the next element now longer has a higher dist
           for(int i = 0; i<nrGridNodes; i++) {
             if(get<0>(grid[get<0>(gridOrder[i])][get<1>(gridOrder[i])].coord) == std::get<0>(current->coord)+x && get<1>(grid[get<0>(gridOrder[i])][get<1>(gridOrder[i])].coord) == std::get<1>(current->coord)+y) {
+              //RCLCPP_INFO(node_->get_logger(), "i = %i, gridOrder[i] = (%i, %i)", i, get<0>(gridOrder[i]), get<1>(gridOrder[i]));
+              
               while(--i > vIndex && grid[get<0>(gridOrder[i])][get<1>(gridOrder[i])].g > newF) {
-                std::get<0>(grid[get<0>(gridOrder[i+1])][get<1>(gridOrder[i+1])].coord) = std::get<0>(grid[get<0>(gridOrder[i])][get<1>(gridOrder[i])].coord);
-                std::get<1>(grid[get<0>(gridOrder[i+1])][get<1>(gridOrder[i+1])].coord) = std::get<1>(grid[get<0>(gridOrder[i])][get<1>(gridOrder[i])].coord);
+                //std::get<0>(grid[get<0>(gridOrder[i+1])][get<1>(gridOrder[i+1])].coord) = std::get<0>(grid[get<0>(gridOrder[i])][get<1>(gridOrder[i])].coord);
+                //std::get<1>(grid[get<0>(gridOrder[i+1])][get<1>(gridOrder[i+1])].coord) = std::get<1>(grid[get<0>(gridOrder[i])][get<1>(gridOrder[i])].coord);
+                
+                gridOrder[i+1] = gridOrder[i];
               }
-              std::get<0>(grid[get<0>(gridOrder[i+1])][get<1>(gridOrder[i+1])].coord) = std::get<0>(current->coord);
-              std::get<1>(grid[get<0>(gridOrder[i+1])][get<1>(gridOrder[i+1])].coord) = std::get<1>(current->coord);
+              gridOrder[i+1] = grid[std::get<0>(current->coord)+x][std::get<1>(current->coord)+y].coord;
+              
+              std::get<0>(grid[get<0>(gridOrder[i+1])][get<1>(gridOrder[i+1])].prev) = std::get<0>(current->coord);
+              std::get<1>(grid[get<0>(gridOrder[i+1])][get<1>(gridOrder[i+1])].prev) = std::get<1>(current->coord);
               break;
             }
           }
+          
+          /*RCLCPP_ERROR(node_->get_logger(), "Grid Order:");
+          for(int i = 0; i<nrGridNodes; i++) {
+            RCLCPP_ERROR(node_->get_logger(), "%i: (%i, %i)", i, get<0>(gridOrder[i]), get<1>(gridOrder[i]));
+          }*/
         }
       }
     }
@@ -225,11 +264,13 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
 
   std::vector<geometry_msgs::msg::Point> grid_path;
   std::tuple<int, int> pt = grid[std::round(goal_grid.x) - grid_bottom_left_x][std::round(goal_grid.y) - grid_bottom_left_y].coord;
-  while(pt != grid[start_x][start_y].coord) {
+  while(!(pt == grid[std::get<0>(pt)][std::get<1>(pt)].prev)) {
+  
     geometry_msgs::msg::Point newP;
     newP.set__x(std::get<0>(pt));
     newP.set__y(std::get<1>(pt));
-    newP.set__z(0);
+    newP.set__z(0.0);
+    
     grid_path.push_back(newP);
 
     cost += std::sqrt(std::pow(std::get<0>(grid[std::get<0>(pt)][std::get<1>(pt)].coord) - std::get<0>(grid[std::get<0>(grid[std::get<0>(pt)][std::get<1>(pt)].prev)][std::get<1>(grid[std::get<0>(pt)][std::get<1>(pt)].prev)].coord), 2)
