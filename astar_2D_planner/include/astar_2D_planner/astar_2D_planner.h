@@ -44,6 +44,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <mbf_octo_core/octo_planner.h>
 #include <mbf_msgs/action/get_path.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
 
 namespace astar_2D_planner
 {
@@ -178,8 +179,8 @@ private:
   } config_;
   // Utility functions of the 3D Planner.
   // // Callback for point cloud subscription.
-  void pointcloud2Callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
+  void ugvCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr& msg);
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr pointcloud_sub_;
    // Occupancy grid represented as a 3D vector.
   std::vector<std::vector<std::vector<int>>> occupancy_grid_;
   // geometry_msgs::msg::Point find_nearest_3d_point(geometry_msgs::msg::Point point, const std::vector<std::vector<std::vector<int>>>& array_3d);
@@ -194,23 +195,23 @@ private:
   // std::vector<std::tuple<int, int, int>> astar(const std::tuple<int, int, int>& start,
   //                                              const std::tuple<int, int, int>& goal);
   // Voxel grid parameters.
-  // double voxel_size_;
-  // double z_threshold_;
-  // double robot_radius_ = 0.35;
-  // double min_vertical_clearance_ = 0.4;
-  // double max_vertical_clearance_ = 0.6;
+  double voxel_size_;
+  double z_threshold_;
+  double robot_radius_ = 0.35;
+  double min_vertical_clearance_ = 0.4;
+  double max_vertical_clearance_ = 0.6;
 
   // // Minimum bound for the occupancy grid.
-  // std::array<double, 3> min_bound_;
+  std::array<double, 3> min_bound_;
 
   // // Hash function for tuple<int, int, int> to track unique occupied voxels
-  // struct TupleHash {
-  //   template <typename T1, typename T2, typename T3>
-  //   std::size_t operator()(const std::tuple<T1, T2, T3>& t) const {
-  //     auto [a, b, c] = t;
-  //     return std::hash<T1>()(a) ^ std::hash<T2>()(b) ^ std::hash<T3>()(c);
-  //   }
-  // };
+  struct TupleHash {
+    template <typename T1, typename T2, typename T3>
+    std::size_t operator()(const std::tuple<T1, T2, T3>& t) const {
+      auto [a, b, c] = t;
+      return std::hash<T1>()(a) ^ std::hash<T2>()(b) ^ std::hash<T3>()(c);
+    }
+  };
 };
 
 }  // namespace astar_2D_planner

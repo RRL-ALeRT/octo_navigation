@@ -40,13 +40,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/header.hpp>
-#include <sensor_msgs/msg/point_cloud2.hpp>
-
-#include <pcl_conversions/pcl_conversions.h>
-#include <pcl/point_cloud.h>
-#include <pcl/point_types.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/common/common.h>
+#include <nav_msgs/msg/occupancy_grid.hpp>
 
 #include <mbf_msgs/action/get_path.hpp>
 #include <astar_2D_planner/astar_2D_planner.h>
@@ -57,6 +51,7 @@
 #include <algorithm>
 #include <math.h>
 #include <cmath>
+#include <string>
 
 PLUGINLIB_EXPORT_CLASS(astar_2D_planner::Astar2DPlanner, mbf_octo_core::OctoPlanner);
 
@@ -97,8 +92,8 @@ bool Astar2DPlanner::isOccupied(const std::tuple<int, int, int>& pt)
 {
   int x, y, z;
   std::tie(x, y, z) = pt;
-  // In this example an occupied voxel is marked with the value 100.
-  return occupancy_grid_[x][y][z] == 100;
+
+  return !(occupancy_grid_[x][y][z] == 0);
   //return false;
 }
 
@@ -316,6 +311,7 @@ bool Astar2DPlanner::initialize(const std::string& plugin_name, const rclcpp::No
 {
   name_ = plugin_name;
   node_ = node;
+  RCLCPP_INFO(node_->get_logger(), "init start");
 
   config_.publish_vector_field = node_->declare_parameter(name_ + ".publish_vector_field", config_.publish_vector_field);
   config_.publish_face_vectors   = node_->declare_parameter(name_ + ".publish_face_vectors", config_.publish_face_vectors);
@@ -333,65 +329,39 @@ bool Astar2DPlanner::initialize(const std::string& plugin_name, const rclcpp::No
   path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("~/path", rclcpp::QoS(1).transient_local());
 
   //ToDo: Create a subscription to the 2D cost topic.
-  pointcloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>("/mapUGV", 1, std::bind(&Astar2DPlanner::pointcloud2Callback, this, std::placeholders::_1));
+  pointcloud_sub_ = node_->create_subscription<nav_msgs::msg::OccupancyGrid>("/mapUGV", 1, std::bind(&Astar2DPlanner::ugvCallback, this, std::placeholders::_1));
 
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(
       std::bind(&Astar2DPlanner::reconfigureCallback, this, std::placeholders::_1));
 
+  RCLCPP_INFO(node_->get_logger(), "init complete");
+
   return true;
 }
 
-void Astar2DPlanner::pointcloud2Callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
+void Astar2DPlanner::ugvCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr& msg)
 {
-  // Convert the ROS2 PointCloud2 message to a PCL point cloud.
-  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
-  pcl::fromROSMsg(*msg, *cloud);
+  int width = (int)msg->info.width;
+  int height = (int)msg->info.height;
 
-  if (cloud->empty()) {
-    RCLCPP_WARN(node_->get_logger(), "No points received in the point cloud.");
-    return;
-  }
-
-  // Get raw point cloud bounds
-  pcl::PointXYZ min_pt, max_pt;
-  pcl::getMinMax3D(*cloud, min_pt, max_pt);
-  RCLCPP_INFO_ONCE(node_->get_logger(),
-              "Raw Cloud Bounds: Min [%f, %f, %f], Max [%f, %f, %f]",
-              min_pt.x, min_pt.y, min_pt.z, max_pt.x, max_pt.y, max_pt.z);
-
-  // Store the minimum bound for coordinate conversion
-  min_bound_ = {min_pt.x, min_pt.y, min_pt.z};
-
-  // Compute grid dimensions
-  int grid_size_x = static_cast<int>(std::ceil((max_pt.x - min_pt.x) / voxel_size_)) + 1;
-  int grid_size_y = static_cast<int>(std::ceil((max_pt.y - min_pt.y) / voxel_size_)) + 1;
-  int grid_size_z = static_cast<int>(std::ceil((max_pt.z - min_pt.z) / voxel_size_)) + 1;
+  //RCLCPP_INFO(node_->get_logger(), "OccupancyGrid recieved: %s, (%i, %i)", std::string(msg->header.frame_id), width, height);
 
   // Initialize 3D occupancy grid with -1 (unknown)
   occupancy_grid_.clear();
-  occupancy_grid_.resize(grid_size_x, 
-                         std::vector<std::vector<int>>(grid_size_y, 
-                         std::vector<int>(grid_size_z, -1)));
+  occupancy_grid_.resize(width, 
+                         std::vector<std::vector<int>>(height, 
+                         std::vector<int>(1, -1)));
 
   // Track occupied voxel count
   std::unordered_set<std::tuple<int, int, int>, TupleHash> occupied_voxels;
 
   // Populate the occupancy grid
-  for (const auto& point : cloud->points) {
-    int x_idx = static_cast<int>(std::round((point.x - min_pt.x) / voxel_size_));
-    int y_idx = static_cast<int>(std::round((point.y - min_pt.y) / voxel_size_));
-    int z_idx = static_cast<int>(std::round((point.z - min_pt.z) / voxel_size_));
-
-    if (x_idx >= 0 && x_idx < grid_size_x &&
-        y_idx >= 0 && y_idx < grid_size_y &&
-        z_idx >= 0 && z_idx < grid_size_z) {
-      occupancy_grid_[x_idx][y_idx][z_idx] = 100;
-      occupied_voxels.insert({x_idx, y_idx, z_idx});
+  for(int y = 0; y<height; y++) {
+    for(int x = 0; x<width; x++) {
+      occupancy_grid_[x][y][0] = msg->data[x + y*width];
+      occupied_voxels.insert({x, y, 0});
     }
   }
-
-  RCLCPP_INFO_ONCE(node_->get_logger(), "Voxel Grid Size: [%d x %d x %d], Occupied Cells: %ld",
-              grid_size_x, grid_size_y, grid_size_z, occupied_voxels.size());
 }
 
 rcl_interfaces::msg::SetParametersResult Astar2DPlanner::reconfigureCallback(std::vector<rclcpp::Parameter> parameters)

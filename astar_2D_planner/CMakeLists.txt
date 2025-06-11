@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.8)
 project(astar_2D_planner)
 
+add_compile_options(-Wall -g3)
+
 set (CMAKE_CXX_STANDARD 20)
 
 find_package(ament_cmake_ros REQUIRED)
@@ -24,7 +26,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
   ${pluginlib_INCLUDE_DIRS}
 )
 target_compile_definitions(${PROJECT_NAME} PRIVATE "ASTAR_2D_PLANNER_BUILDING_LIBRARY")
-ament_target_dependencies(${PROJECT_NAME} mbf_octo_core mbf_msgs mbf_utility rclcpp pluginlib sensor_msgs)
+ament_target_dependencies(${PROJECT_NAME} mbf_octo_core mbf_msgs mbf_utility rclcpp pluginlib sensor_msgs pcl_conversions)
 target_link_libraries(${PROJECT_NAME}
     ${MPI_CXX_LIBRARIES}
 )
