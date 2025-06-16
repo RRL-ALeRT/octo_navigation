@@ -93,7 +93,9 @@ bool Astar2DPlanner::isOccupied(const std::tuple<int, int, int>& pt)
   int x, y, z;
   std::tie(x, y, z) = pt;
 
-  return !(occupancy_grid_[x][y][z] == 0);
+  RCLCPP_INFO(node_->get_logger(), "isOccupied(x = %i, y = %i, z = %i) = %i", x, y, z, occupancy_grid_[x][y][z]);
+
+  return occupancy_grid_[x][y][z] > 0;
   //return false;
 }
 
@@ -209,7 +211,7 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
       for(int y = -1; y<=1; y++) {
         //RCLCPP_INFO(node_->get_logger(), "x = %i, y = %i", x, y);
         if(get<0>(current->coord) + x < 0 || get<1>(current->coord) + y < 0 || std::get<0>(current->coord) + x >= grid_size_x || std::get<1>(current->coord) + y >= grid_size_y || grid[std::get<0>(current->coord)+x][std::get<1>(current->coord)+y].visited || isOccupied(std::tuple<int, int, int>(std::get<0>(current->coord)+x, std::get<1>(current->coord)+y, 0))) {
-          //RCLCPP_INFO(node_->get_logger(), "Continue"); // crash at (1, 0) in isOccupied
+          //RCLCPP_INFO(node_->get_logger(), "Continue at x = %i, y = %i, isOccupied = %i", x, y, (int)isOccupied(std::tuple<int, int, int>(std::get<0>(current->coord)+x, std::get<1>(current->coord)+y, 0))); // crash at (1, 0) in isOccupied
           continue; // neighbour not in unvisited or neighbour is occupied or part of border
         }
 
@@ -329,7 +331,13 @@ bool Astar2DPlanner::initialize(const std::string& plugin_name, const rclcpp::No
   path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("~/path", rclcpp::QoS(1).transient_local());
 
   //ToDo: Create a subscription to the 2D cost topic.
-  pointcloud_sub_ = node_->create_subscription<nav_msgs::msg::OccupancyGrid>("/mapUGV", 1, std::bind(&Astar2DPlanner::ugvCallback, this, std::placeholders::_1));
+  //pointcloud_sub_ = node_->create_subscription<nav_msgs::msg::OccupancyGrid>("/mapUGV", 1, std::bind(&Astar2DPlanner::ugvCallback, this, std::placeholders::_1));
+  pointcloud_sub_ = node_->create_subscription<nav_msgs::msg::OccupancyGrid>(
+    "/mapUGV",
+    10,
+    [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+        this->ugvCallback(msg);
+    });
 
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(
       std::bind(&Astar2DPlanner::reconfigureCallback, this, std::placeholders::_1));
@@ -344,7 +352,10 @@ void Astar2DPlanner::ugvCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr& 
   int width = (int)msg->info.width;
   int height = (int)msg->info.height;
 
-  //RCLCPP_INFO(node_->get_logger(), "OccupancyGrid recieved: %s, (%i, %i)", std::string(msg->header.frame_id), width, height);
+  RCLCPP_INFO(node_->get_logger(), "OccupancyGrid recieved: %s, (%i, %i), Data =", std::string(msg->header.frame_id), width, height);
+  for (int i = 0; i<width*height; i++) {
+    RCLCPP_INFO(node_->get_logger(), "%i", msg->data[i]);
+  }
 
   // Initialize 3D occupancy grid with -1 (unknown)
   occupancy_grid_.clear();
@@ -358,7 +369,7 @@ void Astar2DPlanner::ugvCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr& 
   // Populate the occupancy grid
   for(int y = 0; y<height; y++) {
     for(int x = 0; x<width; x++) {
-      occupancy_grid_[x][y][0] = msg->data[x + y*width];
+      occupancy_grid_[x][y][0] = msg->data[x + y*width]; // <- bugged, alles -1
       occupied_voxels.insert({x, y, 0});
     }
   }
