@@ -203,6 +203,7 @@ private:
 
   // // Minimum bound for the occupancy grid.
   std::array<double, 3> min_bound_;
+  std::array<double, 3> max_bound_;
 
   // // Hash function for tuple<int, int, int> to track unique occupied voxels
   struct TupleHash {

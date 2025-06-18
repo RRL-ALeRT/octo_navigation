@@ -84,6 +84,7 @@ Astar2DPlanner::Astar2DPlanner()
 
   // Set a default minimum bound; this will be updated when processing point clouds.
   min_bound_ = {0.0, 0.0, 0.0};
+  max_bound_ = {0.0, 0.0, 0.0};
 }
 
 Astar2DPlanner::~Astar2DPlanner() {}
@@ -93,7 +94,8 @@ bool Astar2DPlanner::isOccupied(const std::tuple<int, int, int>& pt)
   int x, y, z;
   std::tie(x, y, z) = pt;
 
-  RCLCPP_INFO(node_->get_logger(), "isOccupied(x = %i, y = %i, z = %i) = %i", x, y, z, occupancy_grid_[x][y][z]);
+  RCLCPP_INFO(node_->get_logger(), "isOccupied(x = %i, y = %i, z = %i)", x, y, z);
+  RCLCPP_INFO(node_->get_logger(), "Occupancy Grid = %i", occupancy_grid_[x][y][z]); //Seg Fault (exit code -11) oft bei y=1. Sometimes values -1138778239
 
   return occupancy_grid_[x][y][z] > 0;
   //return false;
@@ -136,10 +138,10 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
 
   RCLCPP_INFO(node_->get_logger(), "Start position after conversion: start_x = %f, start_y = %f, goal_x = %f, goal_y = %f", start_grid.x, start_grid.y, goal_grid.x, goal_grid.y);
 
-  int grid_size_x = std::floor(std::abs(goal_grid.x - start_grid.x)) + 1;
-  int grid_size_y = std::floor(std::abs(goal_grid.y - start_grid.y)) + 1;
-  int grid_bottom_left_x = std::round(std::min(start_grid.x, goal_grid.x));
-  int grid_bottom_left_y = std::round(std::min(start_grid.y, goal_grid.y));
+  int grid_size_x = max_bound_[0]; //std::floor(std::abs(goal_grid.x - start_grid.x)) + 1;
+  int grid_size_y = max_bound_[1]; //std::floor(std::abs(goal_grid.y - start_grid.y)) + 1;
+  int grid_bottom_left_x = 0; //std::round(std::min(start_grid.x, goal_grid.x));
+  int grid_bottom_left_y = 0; //std::round(std::min(start_grid.y, goal_grid.y));
   int nrGridNodes = grid_size_x*grid_size_y;
   int start_x = std::round(start_grid.x);
   int start_y = std::round(start_grid.y);
@@ -169,7 +171,6 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
   RCLCPP_INFO(node_->get_logger(), "grid empty?: %i", (int)grid.empty());
   RCLCPP_INFO(node_->get_logger(), "size: %i", (int)grid.size());
   
-  RCLCPP_INFO(node_->get_logger(), "node(0, 0) f: %f", grid.at(0).at(0).f);
   RCLCPP_INFO(node_->get_logger(), "Inner size: %i", (int)grid[0].size());
   
   /*for(const auto& column : grid) {
@@ -178,10 +179,12 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
   	}
   }*/
 
-  //Initialize starting node <-- SIGSEGV
+  //Initialize starting node
   grid[start_x][start_y].f = 0.0;
   grid[start_x][start_y].g = 0.0;
   grid[start_x][start_y].prev = std::tuple<int, int>(start_x, start_y);
+
+  RCLCPP_INFO(node_->get_logger(), "node(%i, %i) g: %f", start_x, start_y, grid.at(start_x).at(start_y).g);
 
   // Swap order with node (0, 0)
   std::get<0>(gridOrder[start_y+grid_size_y*start_x]) = 0;
@@ -189,16 +192,22 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
   std::get<0>(gridOrder[0]) = start_x;
   std::get<1>(gridOrder[0]) = start_y;
   
-  RCLCPP_INFO(node_->get_logger(), "isOccupied(0,0) = %i", (int)isOccupied(std::tuple<int, int, int>(0, 0, 0)));
-  
+  RCLCPP_INFO(node_->get_logger(), "isOccupied(%i,%i) = %i", start_x, start_y, (int)isOccupied(std::tuple<int, int, int>(start_x, start_y, 0)));
+  RCLCPP_INFO(node_->get_logger(), "gridOrder(0) = %i, %i, gridOrder(grid) = (%i, %i, %f)", start_x, start_y, std::get<0>(grid[std::get<0>(gridOrder[0])][std::get<1>(gridOrder[0])].coord), std::get<1>(grid[std::get<0>(gridOrder[0])][std::get<1>(gridOrder[0])].coord), grid[std::get<0>(gridOrder[0])][std::get<1>(gridOrder[0])].g);
+
   for(int vIndex = 0; vIndex<nrGridNodes; vIndex++) {
-    //TODO: If goal not reached, double grid_size_x,y and add everything outside old grid_size and add all the nodes at the edges to the queue
-    
+    //RCLCPP_INFO(node_->get_logger(), "vIndex = %i", vIndex);
+
     GridNode* current = &grid[std::get<0>(gridOrder[vIndex])][std::get<1>(gridOrder[vIndex])];
     current->visited = true;
 
-     RCLCPP_INFO(node_->get_logger(), "Current node: x = %i, y = %i, g=%f, vIndex=%i, gridOrderX=%i, gridOrderY=%i", get<0>(current->coord), get<1>(current->coord), current->g, vIndex, std::get<0>(gridOrder[vIndex]), std::get<1>(gridOrder[vIndex]));
+    RCLCPP_INFO(node_->get_logger(), "Current node: x = %i, y = %i, g=%f", get<0>(current->coord), get<1>(current->coord), current->g);
+    //RCLCPP_INFO(node_->get_logger(), "Current node: x = %i, y = %i, g=%f, vIndex=%i, gridOrderX=%i, gridOrderY=%i", get<0>(current->coord), get<1>(current->coord), current->g, vIndex, std::get<0>(gridOrder[vIndex]), std::get<1>(gridOrder[vIndex]));
     
+    if(grid[std::get<0>(current->coord)][std::get<1>(current->coord)].g > 2*grid_size_x*grid_size_y) {
+      RCLCPP_INFO(node_->get_logger(), "Costs = infinity. Terminating search...");
+      break;
+    }
 
     if(std::get<0>(current->coord) == goal_x && std::get<1>(current->coord) == goal_y) {
       RCLCPP_ERROR(node_->get_logger(), "Goal reached. Terminating search...");
@@ -211,7 +220,7 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
       for(int y = -1; y<=1; y++) {
         //RCLCPP_INFO(node_->get_logger(), "x = %i, y = %i", x, y);
         if(get<0>(current->coord) + x < 0 || get<1>(current->coord) + y < 0 || std::get<0>(current->coord) + x >= grid_size_x || std::get<1>(current->coord) + y >= grid_size_y || grid[std::get<0>(current->coord)+x][std::get<1>(current->coord)+y].visited || isOccupied(std::tuple<int, int, int>(std::get<0>(current->coord)+x, std::get<1>(current->coord)+y, 0))) {
-          //RCLCPP_INFO(node_->get_logger(), "Continue at x = %i, y = %i, isOccupied = %i", x, y, (int)isOccupied(std::tuple<int, int, int>(std::get<0>(current->coord)+x, std::get<1>(current->coord)+y, 0))); // crash at (1, 0) in isOccupied
+          //RCLCPP_INFO(node_->get_logger(), "Continue at x = %i, y = %i", x, y); // crash at (1, 0) in isOccupied
           continue; // neighbour not in unvisited or neighbour is occupied or part of border
         }
 
@@ -351,11 +360,20 @@ void Astar2DPlanner::ugvCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr& 
 {
   int width = (int)msg->info.width;
   int height = (int)msg->info.height;
+  int origin_x = (int)msg->info.origin.position.x;
+  int origin_y = (int)msg->info.origin.position.y;
 
-  RCLCPP_INFO(node_->get_logger(), "OccupancyGrid recieved: %s, (%i, %i), Data =", std::string(msg->header.frame_id), width, height);
+  RCLCPP_INFO(node_->get_logger(), "OccupancyGrid recieved: width = %i, height = %i, orig_x = %i, orig_y = %i", width, height, origin_x, origin_y);
+
+  min_bound_[0] = msg->info.origin.position.x;
+  min_bound_[1] = msg->info.origin.position.y;
+  max_bound_[0] = msg->info.width;
+  max_bound_[1] = msg->info.height;
+
+  /*RCLCPP_INFO(node_->get_logger(), "OccupancyGrid recieved: %s, (%i, %i), Data =", std::string(msg->header.frame_id), width, height);
   for (int i = 0; i<width*height; i++) {
     RCLCPP_INFO(node_->get_logger(), "%i", msg->data[i]);
-  }
+  }*/
 
   // Initialize 3D occupancy grid with -1 (unknown)
   occupancy_grid_.clear();
