@@ -181,8 +181,8 @@ private:
   // // Callback for point cloud subscription.
   void ugvCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr& msg);
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr pointcloud_sub_;
-   // Occupancy grid represented as a 3D vector.
-  std::vector<std::vector<std::vector<int>>> occupancy_grid_;
+   // Occupancy grid represented as a 2D vector.
+  std::vector<std::vector<int>> occupancy_grid_;
   // geometry_msgs::msg::Point find_nearest_3d_point(geometry_msgs::msg::Point point, const std::vector<std::vector<std::vector<int>>>& array_3d);
   geometry_msgs::msg::Point worldToGrid(const geometry_msgs::msg::Point & point);
   std::array<double, 3> gridToWorld(const std::tuple<int, int, int>& grid_pt);

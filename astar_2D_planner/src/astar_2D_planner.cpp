@@ -94,10 +94,10 @@ bool Astar2DPlanner::isOccupied(const std::tuple<int, int, int>& pt)
   int x, y, z;
   std::tie(x, y, z) = pt;
 
-  RCLCPP_INFO(node_->get_logger(), "isOccupied(x = %i, y = %i, z = %i)", x, y, z);
-  RCLCPP_INFO(node_->get_logger(), "Occupancy Grid = %i", occupancy_grid_[x][y][z]); //Seg Fault (exit code -11) oft bei y=1. Sometimes values -1138778239
+  //RCLCPP_INFO(node_->get_logger(), "isOccupied(x = %i, y = %i, z = %i)", x, y, z);
+  //RCLCPP_INFO(node_->get_logger(), "Occupancy Grid = %i", occupancy_grid_[x][y]);
 
-  return occupancy_grid_[x][y][z] > 0;
+  return occupancy_grid_[x][y] > 0;
   //return false;
 }
 
@@ -148,7 +148,7 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
   int goal_x = std::round(goal_grid.x);
   int goal_y = std::round(goal_grid.y);
   
-  RCLCPP_INFO(node_->get_logger(), "GridSize x: %i, GridSize y: %i", grid_size_x, grid_size_y);
+  //RCLCPP_INFO(node_->get_logger(), "GridSize x: %i, GridSize y: %i", grid_size_x, grid_size_y);
 
   std::vector<std::vector<GridNode>> grid;
   grid.reserve(grid_size_x);
@@ -167,11 +167,11 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
     grid.emplace_back(column);
   }
 
-  RCLCPP_INFO(node_->get_logger(), "init grid: start_x = %i, start_y = %i", start_x, start_y);
-  RCLCPP_INFO(node_->get_logger(), "grid empty?: %i", (int)grid.empty());
-  RCLCPP_INFO(node_->get_logger(), "size: %i", (int)grid.size());
+  //RCLCPP_INFO(node_->get_logger(), "init grid: start_x = %i, start_y = %i", start_x, start_y);
+  //RCLCPP_INFO(node_->get_logger(), "grid empty?: %i", (int)grid.empty());
+  //RCLCPP_INFO(node_->get_logger(), "size: %i", (int)grid.size());
   
-  RCLCPP_INFO(node_->get_logger(), "Inner size: %i", (int)grid[0].size());
+  //RCLCPP_INFO(node_->get_logger(), "Inner size: %i", (int)grid[0].size());
   
   /*for(const auto& column : grid) {
   	for(const auto & node : column) {
@@ -195,13 +195,23 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
   RCLCPP_INFO(node_->get_logger(), "isOccupied(%i,%i) = %i", start_x, start_y, (int)isOccupied(std::tuple<int, int, int>(start_x, start_y, 0)));
   RCLCPP_INFO(node_->get_logger(), "gridOrder(0) = %i, %i, gridOrder(grid) = (%i, %i, %f)", start_x, start_y, std::get<0>(grid[std::get<0>(gridOrder[0])][std::get<1>(gridOrder[0])].coord), std::get<1>(grid[std::get<0>(gridOrder[0])][std::get<1>(gridOrder[0])].coord), grid[std::get<0>(gridOrder[0])][std::get<1>(gridOrder[0])].g);
 
+  std::vector<int> collisionRadiusPointsX;
+  std::vector<int> collisionRadiusPointsY;
+  double r = robot_radius_/voxel_size_; //robot radius in grid units
+  const int nrCollisionRadiusPoints = 12;
+  for(int i = 0; i < nrCollisionRadiusPoints; i++) { //Check for colllision on collision radius
+    double phi = i*M_PI/6;
+    collisionRadiusPointsX.push_back(std::round(r*std::cos(phi)));
+    collisionRadiusPointsY.push_back(std::round(r*std::sin(phi)));
+  }
+
   for(int vIndex = 0; vIndex<nrGridNodes; vIndex++) {
     //RCLCPP_INFO(node_->get_logger(), "vIndex = %i", vIndex);
 
     GridNode* current = &grid[std::get<0>(gridOrder[vIndex])][std::get<1>(gridOrder[vIndex])];
     current->visited = true;
 
-    RCLCPP_INFO(node_->get_logger(), "Current node: x = %i, y = %i, g=%f", get<0>(current->coord), get<1>(current->coord), current->g);
+    //RCLCPP_INFO(node_->get_logger(), "Current node: x = %i, y = %i, g=%f", get<0>(current->coord), get<1>(current->coord), current->g);
     //RCLCPP_INFO(node_->get_logger(), "Current node: x = %i, y = %i, g=%f, vIndex=%i, gridOrderX=%i, gridOrderY=%i", get<0>(current->coord), get<1>(current->coord), current->g, vIndex, std::get<0>(gridOrder[vIndex]), std::get<1>(gridOrder[vIndex]));
     
     if(grid[std::get<0>(current->coord)][std::get<1>(current->coord)].g > 2*grid_size_x*grid_size_y) {
@@ -222,6 +232,18 @@ uint32_t Astar2DPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
         if(get<0>(current->coord) + x < 0 || get<1>(current->coord) + y < 0 || std::get<0>(current->coord) + x >= grid_size_x || std::get<1>(current->coord) + y >= grid_size_y || grid[std::get<0>(current->coord)+x][std::get<1>(current->coord)+y].visited || isOccupied(std::tuple<int, int, int>(std::get<0>(current->coord)+x, std::get<1>(current->coord)+y, 0))) {
           //RCLCPP_INFO(node_->get_logger(), "Continue at x = %i, y = %i", x, y); // crash at (1, 0) in isOccupied
           continue; // neighbour not in unvisited or neighbour is occupied or part of border
+        }
+
+        bool radiusCollision = false;
+        for(int i = 0; i < nrCollisionRadiusPoints; i++) { //Check for colllision on collision radius
+          if(isOccupied(std::tuple<int, int, int>(std::get<0>(current->coord)+collisionRadiusPointsX[i]+x, std::get<1>(current->coord)+collisionRadiusPointsY[i]+y, 0))) {
+            radiusCollision = true;
+            //RCLCPP_ERROR(node_->get_logger(), "Radius collision detected in (%i, %i)", std::get<0>(current->coord)+std::round(r*std::cos(phi))+x, std::get<1>(current->coord)+std::round(r*std::sin(phi))+y);
+            break;
+          }
+        }
+        if(radiusCollision) {
+          break;
         }
 
         double newF = current->g + std::sqrt(x*x + y*y); // dist(current) + cost(current, neighbour)
@@ -378,8 +400,7 @@ void Astar2DPlanner::ugvCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr& 
   // Initialize 3D occupancy grid with -1 (unknown)
   occupancy_grid_.clear();
   occupancy_grid_.resize(width, 
-                         std::vector<std::vector<int>>(height, 
-                         std::vector<int>(1, -1)));
+                         std::vector<int>(height, -1));
 
   // Track occupied voxel count
   std::unordered_set<std::tuple<int, int, int>, TupleHash> occupied_voxels;
@@ -387,7 +408,7 @@ void Astar2DPlanner::ugvCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr& 
   // Populate the occupancy grid
   for(int y = 0; y<height; y++) {
     for(int x = 0; x<width; x++) {
-      occupancy_grid_[x][y][0] = msg->data[x + y*width]; // <- bugged, alles -1
+      occupancy_grid_[x][y] = msg->data[x + y*width]; // <- bugged, alles -1
       occupied_voxels.insert({x, y, 0});
     }
   }
