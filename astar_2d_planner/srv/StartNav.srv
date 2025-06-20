@@ -1,0 +1,4 @@
+int8 mode        # 1 = raw, 2 = smooth
+---
+bool success
+string message

@@ -45,20 +45,29 @@
 #include <mbf_octo_core/octo_planner.h>
 #include <mbf_msgs/action/get_path.hpp>
 
-namespace astar_2D_planner
+#include <nav_msgs/msg/occupancy_grid.hpp>  // OccupancyGrid
+#include <unordered_map>                    // A*
+#include <array>
+#include <cmath>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp> 
+namespace astar_2d_planner
 {
 
-class Astar2DPlanner : public mbf_octo_core::OctoPlanner
+class Astar2dPlanner : public mbf_octo_core::OctoPlanner
 {
 public:
-  typedef std::shared_ptr<astar_2D_planner::Astar2DPlanner> Ptr;
+  typedef std::shared_ptr<astar_2d_planner::Astar2dPlanner> Ptr;
+  geometry_msgs::msg::PoseStamped getCurrentPose(const std::string& target_frame, const std::string& source_frame);
 
-  Astar2DPlanner();
+  Astar2dPlanner();
 
   /**
    * @brief Destructor
    */
-  virtual ~Astar2DPlanner();
+  virtual ~Astar2dPlanner();
+  
 
   /**
    * @brief Given a goal pose in the world, compute a plan
@@ -165,6 +174,9 @@ private:
   std::string map_frame_;
   // handle of callback for changing parameters dynamically
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr reconfiguration_callback_handle_;
+  
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   // config determined by ROS params; Init values defined here are used as default ROS param value
   struct {
     // publisher of resulting vector fiels
@@ -176,6 +188,33 @@ private:
     // defines the vertex cost limit with which it can be accessed
     double cost_limit = 1.0;
   } config_;
+  
+  double map_resolution_{0.1};
+  double origin_x_{0.0}, origin_y_{0.0};
+  std::vector<std::vector<int8_t>> occ_grid_;
+  size_t width_{0}, height_{0};                // grid size
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
+  
+  /* ==== Function For Path Smoothing ==== */
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_smooth_;
+  inline bool isOccupied(int gx,int gy) const;
+  inline bool inBounds(int x,int y) const;
+  bool isLineFree(int x0,int y0,int x1,int y1) const;
+  std::vector<std::pair<int,int>>pruneAndShortcut(const std::vector<std::pair<int,int>>& in) const;
+  std::vector<std::array<double,2>>catmullRom(const std::vector<std::array<double,2>>& ctrl,double ds ) const;
+
+  /* ==== Function ==== */
+  inline std::pair<int,int> worldToGrid(double wx, double wy) const;
+  inline std::array<double,2> gridToWorld(int gx, int gy) const;
+  std::vector<std::pair<int,int>>
+      astar(const std::pair<int,int>& start,
+            const std::pair<int,int>& goal);
+  void mapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+  void goalPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
+  rclcpp_action::Client<mbf_msgs::action::MoveBase>::SharedPtr      mbf_client_;
+  rclcpp_action::Client<mbf_msgs::action::GetPath>::SharedPtr      mbf_getpath_client_;
+  
   // Utility functions of the 3D Planner.
   // // Callback for point cloud subscription.
   // void pointcloud2Callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
@@ -213,6 +252,6 @@ private:
   // };
 };
 
-}  // namespace astar_2D_planner
+}  // namespace astar_2d_planner
 
 #endif  // OCTO_NAVIGATION__ASTAR_2D_PLANNER_H

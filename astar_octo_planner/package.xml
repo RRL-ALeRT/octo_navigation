@@ -12,6 +12,11 @@
     <depend>mbf_utility</depend>
     <depend>mbf_msgs</depend>
     <depend>pluginlib</depend>
+    
+    <depend>rclcpp_action</depend>      
+    <depend>geometry_msgs</depend>     
+    <depend>sensor_msgs</depend>       
+    <depend>pcl_conversions</depend>  
 
   <export>
     <build_type>ament_cmake</build_type>
