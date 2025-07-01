@@ -138,7 +138,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   // Publish the path for visualization.
   nav_msgs::msg::Path path_msg;
   path_msg.header.stamp = node_->now();
-  path_msg.header.frame_id = "odom";
+  path_msg.header.frame_id = "vision";
   path_msg.poses = plan;
   path_pub_->publish(path_msg);
 
@@ -227,7 +227,7 @@ bool AstarOctoPlanner::isOccupied(const std::tuple<int, int, int>& pt)
   return occupancy_grid_[x][y][z] == 100;
 }
 
-bool AstarOctoPlanner::hasNoOccupiedCellsAbove(const std::tuple<int, int, int>& coord, 
+bool AstarOctoPlanner::hasNoOccupiedCellsAbove(const std::tuple<int, int, int>& coord,
                                                double vertical_min, double vertical_range)
 {
   int x, y, z;
@@ -244,7 +244,7 @@ bool AstarOctoPlanner::hasNoOccupiedCellsAbove(const std::tuple<int, int, int>& 
   return true; // No occupied cells found above
 }
 
-bool AstarOctoPlanner::isCylinderCollisionFree(const std::tuple<int, int, int>& coord, double radius) 
+bool AstarOctoPlanner::isCylinderCollisionFree(const std::tuple<int, int, int>& coord, double radius)
 {
   int x, y, z;
   std::tie(x, y, z) = coord;
@@ -387,8 +387,8 @@ void AstarOctoPlanner::pointcloud2Callback(const sensor_msgs::msg::PointCloud2::
 
   // Initialize 3D occupancy grid with -1 (unknown)
   occupancy_grid_.clear();
-  occupancy_grid_.resize(grid_size_x, 
-                         std::vector<std::vector<int>>(grid_size_y, 
+  occupancy_grid_.resize(grid_size_x,
+                         std::vector<std::vector<int>>(grid_size_y,
                          std::vector<int>(grid_size_z, -1)));
 
   // Track occupied voxel count
@@ -440,7 +440,7 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
 
   // Create a subscription to the point cloud topic.
   pointcloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-      "/octomap_point_cloud_centers", 1,
+      "/navigation/octomap_point_cloud_centers", 1,
       std::bind(&AstarOctoPlanner::pointcloud2Callback, this, std::placeholders::_1));
 
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(
