@@ -10,7 +10,7 @@ env/
 
 # Ignore log files
 *.log
-
+*test*
 # Ignore temporary files
 *.tmp
 *.swp
