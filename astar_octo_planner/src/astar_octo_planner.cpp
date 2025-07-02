@@ -93,6 +93,9 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
               start.pose.position.x, start.pose.position.y, start.pose.position.z,
               start.header.frame_id.c_str());
 
+  RCLCPP_INFO(node_->get_logger(), "Goal position: x = %f, y = %f, z = %f, frame_id = %s",
+  goal.pose.position.x, goal.pose.position.y, goal.pose.position.z,
+  goal.header.frame_id.c_str());
   // Convert world coordinates to grid indices using the helper function.
   auto start_grid_pt = worldToGrid(start.pose.position);
   auto goal_grid_pt = worldToGrid(goal.pose.position);
@@ -138,7 +141,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   // Publish the path for visualization.
   nav_msgs::msg::Path path_msg;
   path_msg.header.stamp = node_->now();
-  path_msg.header.frame_id = "vision";
+  path_msg.header.frame_id = "odom";
   path_msg.poses = plan;
   path_pub_->publish(path_msg);
 
@@ -227,7 +230,7 @@ bool AstarOctoPlanner::isOccupied(const std::tuple<int, int, int>& pt)
   return occupancy_grid_[x][y][z] == 100;
 }
 
-bool AstarOctoPlanner::hasNoOccupiedCellsAbove(const std::tuple<int, int, int>& coord,
+bool AstarOctoPlanner::hasNoOccupiedCellsAbove(const std::tuple<int, int, int>& coord, 
                                                double vertical_min, double vertical_range)
 {
   int x, y, z;
@@ -244,14 +247,39 @@ bool AstarOctoPlanner::hasNoOccupiedCellsAbove(const std::tuple<int, int, int>& 
   return true; // No occupied cells found above
 }
 
-bool AstarOctoPlanner::isCylinderCollisionFree(const std::tuple<int, int, int>& coord, double radius)
+bool AstarOctoPlanner::needToSquat(const std::tuple<int, int, int>& coord, 
+  double vertical_range, double squat_range,double fb_distance,double width)
+{
+  int x, y, z;
+  std::tie(x, y, z) = coord;
+
+  int x_min = x - static_cast<int>(fb_distance / voxel_size_);
+  int x_max = x + static_cast<int>(fb_distance / voxel_size_);
+  int y_min = y - static_cast<int>(width / voxel_size_);
+  int y_max = y + static_cast<int>(width / voxel_size_);
+  int z_min = z + static_cast<int>(vertical_range / voxel_size_);
+  int z_max = z + static_cast<int>(squat_range/ voxel_size_);
+  for (int y_check = y_min; y_check <= y_max; y_check= y_check+2){
+    for (int z_check = z_min; z_check <= z_max; ++z_check) {
+      if (isWithinBounds({x_min, y_check, z_check}) && isOccupied({x_min, y_check, z_check})) {
+        return true; // Found an occupied cell
+      }
+      if (isWithinBounds({x_max, y_check, z_check}) && isOccupied({x_max, y_check, z_check})) {
+        return true; // Found an occupied cell
+      }
+    }
+  }
+  return false; // No occupied cells found above
+}
+
+bool AstarOctoPlanner::isCylinderCollisionFree(const std::tuple<int, int, int>& coord, double radius,double min_z, double max_z) 
 {
   int x, y, z;
   std::tie(x, y, z) = coord;
 
   double grid_radius = radius / voxel_size_;
-  int grid_z_start = static_cast<int>(0.4 / voxel_size_);
-  int grid_z_end = static_cast<int>(0.6 / voxel_size_);
+  int grid_z_start = static_cast<int>(min_z / voxel_size_);
+  int grid_z_end = static_cast<int>(max_z / voxel_size_); 
 
   int num_points = static_cast<int>(2 * M_PI * grid_radius);
 
@@ -307,10 +335,40 @@ std::vector<std::tuple<int, int, int>> AstarOctoPlanner::astar(const std::tuple<
 
     if (current.coord == goal) {
       std::vector<std::tuple<int, int, int>> path;
+      std::vector<std::tuple<int, int, int>> Squat_path;
       auto node = current.coord;
       while (came_from.find(node) != came_from.end()) {
+        bool Squatflag = needToSquat(node,max_vertical_clearance_,max_vertical_squat_,squat_x,squat_y);
+        if (Squatflag){
+          int x, y, z;
+          std::tie(x, y, z) = node;
+          RCLCPP_INFO(node_->get_logger(), "point need to Squat : x = %d, y = %d, z = %d,",x,y,z);
+          Squat_path.push_back(node);
+        }
         path.push_back(node);
         node = came_from[node];
+      }
+      if (!Squat_path.empty()) {
+        // Convert grid path back to world coordinates and build the plan.
+        std::vector<geometry_msgs::msg::PoseStamped> plan_squat;
+        plan_squat.clear();
+        for (const auto& grid_pt : Squat_path) {
+          auto world_pt = gridToWorld(grid_pt);
+          geometry_msgs::msg::PoseStamped pose;
+          pose.header.frame_id = "map";  // Use same frame and timestamp
+          pose.pose.position.x = world_pt[0];
+          pose.pose.position.y = world_pt[1];
+          pose.pose.position.z = world_pt[2];
+          pose.pose.orientation.w = 1.0;  // Default orientation
+          plan_squat.push_back(pose);
+        }
+        std::reverse(plan_squat.begin(), plan_squat.end());   // start → goal
+        // Publish the path for visualization.
+        nav_msgs::msg::Path path_msg;
+        path_msg.header.stamp = node_->now();
+        path_msg.header.frame_id = "odom";
+        path_msg.poses = plan_squat;
+        Squat_path_pub_ ->publish(path_msg);
       }
       path.push_back(start);
       std::reverse(path.begin(), path.end());
@@ -328,7 +386,7 @@ std::vector<std::tuple<int, int, int>> AstarOctoPlanner::astar(const std::tuple<
       if (!isWithinBounds(neighbor))
         continue;
 
-      if (!isOccupied(neighbor))
+      if (!isOccupied(neighbor)) //if the neighbors is obstacle then pass it
         continue;
 
       // Check if neighbor is within certain Z distance
@@ -340,7 +398,7 @@ std::vector<std::tuple<int, int, int>> AstarOctoPlanner::astar(const std::tuple<
       if (z_diff > z_constraint)
         continue;
 
-      if (!isCylinderCollisionFree(neighbor, robot_radius_))
+      if (!isCylinderCollisionFree(neighbor, robot_radius_,min_vertical_clearance_,max_vertical_clearance_))
         continue;
 
       if (!hasNoOccupiedCellsAbove(neighbor, min_vertical_clearance_, max_vertical_clearance_))
@@ -387,8 +445,8 @@ void AstarOctoPlanner::pointcloud2Callback(const sensor_msgs::msg::PointCloud2::
 
   // Initialize 3D occupancy grid with -1 (unknown)
   occupancy_grid_.clear();
-  occupancy_grid_.resize(grid_size_x,
-                         std::vector<std::vector<int>>(grid_size_y,
+  occupancy_grid_.resize(grid_size_x, 
+                         std::vector<std::vector<int>>(grid_size_y, 
                          std::vector<int>(grid_size_z, -1)));
 
   // Track occupied voxel count
@@ -438,11 +496,12 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
 
   path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("~/path", rclcpp::QoS(1).transient_local());
 
+  Squat_path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("~/Squatpath", rclcpp::QoS(1).transient_local());
   // Create a subscription to the point cloud topic.
   pointcloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-      "/navigation/octomap_point_cloud_centers", 1,
+      "/octomap_point_cloud_centers", 1,
       std::bind(&AstarOctoPlanner::pointcloud2Callback, this, std::placeholders::_1));
-
+  
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(
       std::bind(&AstarOctoPlanner::reconfigureCallback, this, std::placeholders::_1));
 
