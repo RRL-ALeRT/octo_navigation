@@ -15,7 +15,7 @@ find_package(std_srvs REQUIRED)
 find_package(nav_msgs REQUIRED)  # ExePath goal.path
 find_package(geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED) # For StartNav.srv
-# find_package(astar_2d_planner REQUIRED)
+find_package(webots_spot_msgs REQUIRED) # For posture
 
 add_executable(exe_path_node src/exe_path_node.cpp)
 ament_target_dependencies(exe_path_node
@@ -27,15 +27,35 @@ ament_target_dependencies(exe_path_node
   mbf_octo_core
   mbf_utility
   geometry_msgs
-  # astar_2d_planner
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/StartNav.srv"
 )
 
+# new service
+add_executable(posture_manager src/posture_manager.cpp)
+ament_target_dependencies(posture_manager
+  rclcpp 
+  nav_msgs 
+  geometry_msgs 
+  mbf_octo_core 
+  mbf_msgs 
+  mbf_utility 
+  webots_spot_msgs)
+install(TARGETS posture_manager
+ DESTINATION lib/${PROJECT_NAME}
+)
+
 # Export rosidl
-ament_export_dependencies(rosidl_default_runtime)
+ament_export_dependencies(
+  rosidl_default_runtime
+  mbf_octo_core 
+  mbf_msgs 
+  mbf_utility 
+  rclcpp pluginlib 
+  clcpp_action 
+  geometry_msgs)
 
 rosidl_get_typesupport_target(TYPESUPPORT_CPP_TARGET ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(exe_path_node ${TYPESUPPORT_CPP_TARGET})
