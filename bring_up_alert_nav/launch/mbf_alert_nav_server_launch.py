@@ -12,7 +12,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
 
     mbf_octo_nav_config = os.path.join(
-        get_package_share_directory("bring_up"), "params", "mbf_alert_nav.yaml"
+        get_package_share_directory("bring_up_alert_nav"), "params", "mbf_alert_nav.yaml"
     )
 
     octo_nav_server = Node(

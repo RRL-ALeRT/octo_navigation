@@ -7,12 +7,22 @@
   <maintainer email="m.kirsch@fh-aachen.de">max1</maintainer>
   <license>TODO: License declaration</license>
 
+  <!-- For CPP -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>rclpy</depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+  <depend>mbf_octo_core</depend>
+  <depend>mbf_msgs</depend>
+  <depend>mbf_utility</depend>
+
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
 
   <export>
-    <build_type>ament_python</build_type>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>
