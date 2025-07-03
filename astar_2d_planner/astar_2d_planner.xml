@@ -1,5 +1,6 @@
-<library path="astar_2D_planner">
-    <class name="astar_2D_planner/Astar2DPlanner" type="astar_2D_planner::Astar2DPlanner"
+<library path="astar_2d_planner_core">
+    <class name="astar_2d_planner/Astar2dPlanner" 
+           type="astar_2d_planner::Astar2dPlanner"
            base_class_type="mbf_octo_core::OctoPlanner">
         <description>
             An Astar 2D costmap planner for mbf_octo_nav
