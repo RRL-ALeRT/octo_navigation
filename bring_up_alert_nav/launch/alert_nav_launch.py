@@ -13,7 +13,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     # path to this pkg
-    pkg_bring_up = get_package_share_directory("bring_up")
+    pkg_bring_up = get_package_share_directory("bring_up_alert_nav")
 
     # Launch arguments
 
@@ -24,6 +24,24 @@ def generate_launch_description():
                 [pkg_bring_up, "launch", "mbf_alert_nav_server_launch.py"]
             )
         ),
+    )
+
+    # Rviz2 send_goal Node
+    delayed_exe_path = Node(
+        package="bring_up_alert_nav",
+        executable="exe_path_node",
+        name="exe_path",
+        output="screen")
+    
+    # Node for octo_planner
+    posture_mgr = Node(
+        package="bring_up_alert_nav",
+        executable='posture_manager',
+        parameters=[{
+            'squat_path_topic': '/move_base_flex/Squatpath',
+            'odom_topic': '/Spot/odometry',
+            'height_service': '/Spot/set_height'
+        }]
     )
 
     map_odom = Node(
@@ -38,5 +56,7 @@ def generate_launch_description():
         [
             #map_odom,
             move_base_flex,
+            delayed_exe_path,
+            posture_mgr,
         ]
     )
