@@ -1,0 +1,8 @@
+<library path="mesh_planner">
+    <class name="mesh_planner/MeshPlanner" type="mesh_planner::MeshPlanner"
+           base_class_type="mbf_octo_core::OctoPlanner">
+        <description>
+            A mesh planner for mbf_octo_nav
+        </description>
+    </class>
+</library>
