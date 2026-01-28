@@ -320,13 +320,25 @@ private:
   // When false, incoming octomap messages are ignored and the background
   // graph rebuild timer will not rebuild the graph. Subscription stays active.
   bool enable_octomap_updates_ = true;
+  // When true, merge new octomap data incrementally instead of replacing.
+  // This allows building the graph continuously as the robot explores.
+  bool incremental_graph_build_ = true;
 
   // Octomap topic name (configurable)
   std::string octomap_topic_ = std::string("/navigation/octomap_full");
 
+  // Set of occupied voxel keys already processed (for incremental builds)
+  std::unordered_set<std::string> processed_occupied_keys_;
+  // Set of graph node IDs that need adjacency updates (new or affected by new neighbors)
+  std::unordered_set<std::string> nodes_needing_adjacency_update_;
+
   // Build a sampling-based connectivity graph over interior empty nodes.
   // eps: small epsilon distance (meters) to sample just outside node boundaries.
   void buildConnectivityGraph(double eps = 0.05);
+
+  // Incrementally update the connectivity graph with new voxels.
+  // Only processes new occupied voxels and updates affected adjacencies.
+  void updateConnectivityGraphIncremental(double eps = 0.05);
 
   // Publish graph nodes as visualization Markers (CUBE_LIST)
   void publishGraphMarkers();

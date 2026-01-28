@@ -907,6 +907,240 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
   double dur_graph_total = std::chrono::duration_cast<std::chrono::duration<double>>(t_graph_end - t_graph_start).count();
   RCLCPP_INFO(node_->get_logger(), "Total buildConnectivityGraph() took %.3f s", dur_graph_total);
 
+  // After a full build, mark all occupied voxels as processed
+  processed_occupied_keys_.clear();
+  for (auto it = octree_->begin_leafs(), end = octree_->end_leafs(); it != end; ++it) {
+    if (octree_->isNodeOccupied(*it)) {
+      auto c = it.getCoordinate();
+      char key_buf[128];
+      int ix_mm = static_cast<int>(std::round(c.x() * 1000.0));
+      int iy_mm = static_cast<int>(std::round(c.y() * 1000.0));
+      int iz_mm = static_cast<int>(std::round(c.z() * 1000.0));
+      std::snprintf(key_buf, sizeof(key_buf), "occ_%d_%d_%d", ix_mm, iy_mm, iz_mm);
+      processed_occupied_keys_.insert(std::string(key_buf));
+    }
+  }
+  nodes_needing_adjacency_update_.clear();
+}
+
+void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
+{
+  auto t_start = std::chrono::steady_clock::now();
+  if (!octree_) return;
+
+  // Collect new occupied voxels that we haven't processed yet
+  std::vector<std::tuple<octomap::point3d, octomap::OcTreeKey, unsigned int, double>> new_voxels;
+
+  for (auto it = octree_->begin_leafs(), end = octree_->end_leafs(); it != end; ++it) {
+    if (!octree_->isNodeOccupied(*it)) continue;
+
+    octomap::point3d occ = it.getCoordinate();
+    char key_buf[128];
+    int ix_mm = static_cast<int>(std::round(occ.x() * 1000.0));
+    int iy_mm = static_cast<int>(std::round(occ.y() * 1000.0));
+    int iz_mm = static_cast<int>(std::round(occ.z() * 1000.0));
+    std::snprintf(key_buf, sizeof(key_buf), "occ_%d_%d_%d", ix_mm, iy_mm, iz_mm);
+    std::string voxel_key(key_buf);
+
+    if (processed_occupied_keys_.find(voxel_key) == processed_occupied_keys_.end()) {
+      // This is a new occupied voxel
+      unsigned int depth = it.getDepth();
+      double node_size = octree_->getNodeSize(depth);
+      new_voxels.emplace_back(occ, octree_->coordToKey(occ), depth, node_size);
+      processed_occupied_keys_.insert(voxel_key);
+    }
+  }
+
+  if (new_voxels.empty()) {
+    RCLCPP_DEBUG(node_->get_logger(), "Incremental update: no new voxels to process");
+    return;
+  }
+
+  RCLCPP_INFO(node_->get_logger(), "Incremental update: processing %zu new voxels", new_voxels.size());
+
+  // Create graph nodes for each new occupied voxel (surface nodes above occupied cells)
+  std::vector<std::pair<std::string, GraphNode>> new_nodes;
+
+  for (const auto& [occ, key, depth, node_size] : new_voxels) {
+    double node_z = occ.z() + 0.5 * node_size;
+    node_z += std::max(active_voxel_size_, 0.01);
+
+    if (!std::isfinite(occ.x()) || !std::isfinite(occ.y()) || !std::isfinite(node_z)) continue;
+    if (occ.x() < min_bound_[0] - 1e-6 || occ.x() > max_bound_[0] + 1e-6 ||
+        occ.y() < min_bound_[1] - 1e-6 || occ.y() > max_bound_[1] + 1e-6 ||
+        node_z < min_bound_[2] - 1e-6 || node_z > max_bound_[2] + 1e-6) continue;
+
+    // Vertical clearance check above surface
+    bool vertical_clear = true;
+    double stepz = std::max(active_voxel_size_, 0.05);
+    for (double z = node_z; z <= node_z + robot_height_; z += stepz) {
+      octomap::OcTreeNode* nn = octree_->search(occ.x(), occ.y(), z);
+      if (nn && octree_->isNodeOccupied(nn)) { vertical_clear = false; break; }
+    }
+    if (!vertical_clear) continue;
+
+    octomap::point3d center(occ.x(), occ.y(), node_z);
+    octomap::OcTreeKey center_key = octree_->coordToKey(center);
+
+    GraphNode gn;
+    gn.key = center_key;
+    gn.depth = depth;
+    gn.center = center;
+    gn.size = node_size;
+
+    // Create stable id
+    char idbuf[128];
+    int node_ix_mm = static_cast<int>(std::round(center.x() * 1000.0));
+    int node_iy_mm = static_cast<int>(std::round(center.y() * 1000.0));
+    int node_iz_mm = static_cast<int>(std::round(center.z() * 1000.0));
+    std::snprintf(idbuf, sizeof(idbuf), "c_%d_%d_%d", node_ix_mm, node_iy_mm, node_iz_mm);
+    std::string node_id(idbuf);
+
+    // Only add if not already in the graph
+    if (graph_nodes_.find(node_id) == graph_nodes_.end()) {
+      graph_nodes_.emplace(node_id, gn);
+      graph_adj_[node_id] = std::vector<std::string>(); // Initialize empty adjacency
+      new_nodes.emplace_back(node_id, gn);
+      nodes_needing_adjacency_update_.insert(node_id);
+    }
+  }
+
+  RCLCPP_INFO(node_->get_logger(), "Incremental update: added %zu new graph nodes (total nodes: %zu)",
+              new_nodes.size(), graph_nodes_.size());
+
+  if (new_nodes.empty() && nodes_needing_adjacency_update_.empty()) {
+    return; // Nothing to update
+  }
+
+  // Build adjacency for new nodes and update existing nodes that may connect to new ones
+  const std::vector<octomap::point3d> dirs = [](){
+    std::vector<octomap::point3d> d;
+    for (int dx=-1; dx<=1; ++dx) for (int dy=-1; dy<=1; ++dy) for (int dz=-1; dz<=1; ++dz) {
+      if (dx==0 && dy==0 && dz==0) continue;
+      d.emplace_back(dx, dy, dz);
+    }
+    return d;
+  }();
+
+  // Create a snapshot of nodes that need adjacency updates
+  std::vector<std::pair<std::string, GraphNode>> nodes_to_update;
+  for (const auto& node_id : nodes_needing_adjacency_update_) {
+    auto it = graph_nodes_.find(node_id);
+    if (it != graph_nodes_.end()) {
+      nodes_to_update.emplace_back(it->first, it->second);
+    }
+  }
+
+  // Also include existing nodes that are close to new nodes (they may need new edges)
+  double neighbor_search_radius = active_voxel_size_ * 3.0; // Search nearby existing nodes
+  for (const auto& [new_id, new_node] : new_nodes) {
+    for (const auto& [existing_id, existing_node] : graph_nodes_) {
+      if (existing_id == new_id) continue;
+      if (nodes_needing_adjacency_update_.find(existing_id) != nodes_needing_adjacency_update_.end()) continue;
+
+      double dist = new_node.center.distance(existing_node.center);
+      if (dist <= neighbor_search_radius) {
+        nodes_needing_adjacency_update_.insert(existing_id);
+        nodes_to_update.emplace_back(existing_id, existing_node);
+      }
+    }
+  }
+
+  // Build node index for fast lookups
+  std::unordered_map<std::string, size_t> node_index;
+  std::vector<std::pair<std::string, GraphNode>> all_nodes_snapshot;
+  all_nodes_snapshot.reserve(graph_nodes_.size());
+  for (const auto& kv : graph_nodes_) {
+    node_index[kv.first] = all_nodes_snapshot.size();
+    all_nodes_snapshot.emplace_back(kv.first, kv.second);
+  }
+
+  // Update adjacency for affected nodes
+  for (const auto& [node_id, node] : nodes_to_update) {
+    std::vector<std::string>& adj = graph_adj_[node_id];
+
+    for (const auto& dir : dirs) {
+      octomap::point3d sample = node.center + dir * (node.size * 0.5 + eps);
+
+      if (sample.x() < min_bound_[0] - node.size || sample.x() > max_bound_[0] + node.size ||
+          sample.y() < min_bound_[1] - node.size || sample.y() > max_bound_[1] + node.size ||
+          sample.z() < min_bound_[2] - node.size || sample.z() > max_bound_[2] + node.size) {
+        continue;
+      }
+
+      octomap::OcTreeNode* found = octree_->search(sample.x(), sample.y(), sample.z());
+      if (!found) continue;
+
+      octomap::OcTreeKey fkey = octree_->coordToKey(sample);
+      octomap::point3d found_center = octree_->keyToCoord(fkey);
+
+      // Find the closest graph node to this sample point
+      double best_dist = std::numeric_limits<double>::infinity();
+      std::string best_id;
+      for (const auto& [cand_id, cand_node] : all_nodes_snapshot) {
+        double dx = cand_node.center.x() - found_center.x();
+        double dy = cand_node.center.y() - found_center.y();
+        double dz = cand_node.center.z() - found_center.z();
+        double dsq = dx*dx + dy*dy + dz*dz;
+        if (dsq < best_dist) { best_dist = dsq; best_id = cand_id; }
+      }
+
+      if (best_id.empty() || best_id == node_id) continue;
+
+      double thresh = node.size * 1.5;
+      if (best_dist > thresh * thresh) continue;
+
+      // Line-of-sight check
+      const auto& best_node = graph_nodes_.at(best_id);
+      const octomap::point3d& a = node.center;
+      const octomap::point3d& b = best_node.center;
+      octomap::point3d dir_line = b - a;
+      double dist = dir_line.norm();
+      bool hit = false;
+
+      if (dist > 1e-9) {
+        dir_line /= dist;
+        double step_size = std::max(active_voxel_size_, 0.05);
+        int steps = std::max(1, static_cast<int>(std::ceil(dist / step_size)));
+        for (int si = 1; si < steps; ++si) {
+          double t = static_cast<double>(si) / static_cast<double>(steps);
+          octomap::point3d s = a + dir_line * (dist * t);
+          octomap::OcTreeNode* nn = octree_->search(s.x(), s.y(), s.z());
+          if (nn && octree_->isNodeOccupied(nn)) { hit = true; break; }
+        }
+      }
+
+      if (hit) continue;
+
+      // Add edge if not already present
+      if (std::find(adj.begin(), adj.end(), best_id) == adj.end()) {
+        adj.push_back(best_id);
+      }
+      // Add reverse edge
+      auto& reverse_adj = graph_adj_[best_id];
+      if (std::find(reverse_adj.begin(), reverse_adj.end(), node_id) == reverse_adj.end()) {
+        reverse_adj.push_back(node_id);
+      }
+    }
+  }
+
+  // Clear the pending update set
+  nodes_needing_adjacency_update_.clear();
+
+  // Update penalties for new nodes (simplified - just using centroid shift for new nodes)
+  for (const auto& [node_id, node] : new_nodes) {
+    // Start with zero penalty, can be computed more thoroughly if needed
+    graph_node_penalty_[node_id] = 0.0;
+  }
+
+  // Publish updated markers
+  if (publish_graph_markers_) {
+    publishGraphMarkers();
+  }
+
+  auto t_end = std::chrono::steady_clock::now();
+  double dur = std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
+  RCLCPP_INFO(node_->get_logger(), "Incremental graph update took %.3f s", dur);
 }
 
 void AstarOctoPlanner::publishGraphMarkers()
@@ -1134,6 +1368,10 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
   // keeping the subscription alive (useful to lock the map after mapping pass)
   enable_octomap_updates_ = node_->declare_parameter(name_ + ".enable_octomap_updates", enable_octomap_updates_);
 
+  // parameter: enable/disable incremental graph building (merge new octomap data
+  // into existing octree and incrementally update the graph instead of rebuilding)
+  incremental_graph_build_ = node_->declare_parameter(name_ + ".incremental_graph_build", incremental_graph_build_);
+
   // Declare planner tuning parameters (can be changed at runtime)
   z_threshold_ = node_->declare_parameter(name_ + ".z_threshold", z_threshold_);
   robot_radius_ = node_->declare_parameter(name_ + ".robot_radius", robot_radius_);
@@ -1189,10 +1427,19 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
       if (!graph_dirty_) return;
       std::lock_guard<std::mutex> lock(graph_mutex_);
       if (!graph_dirty_) return;
-      RCLCPP_INFO(node_->get_logger(), "Background: rebuilding connectivity graph...");
-      buildConnectivityGraph();
-      graph_dirty_ = false;
-      RCLCPP_INFO(node_->get_logger(), "Background: connectivity graph ready. Nodes=%zu", graph_nodes_.size());
+
+      // Use incremental update if we have an existing graph and incremental mode is enabled
+      if (incremental_graph_build_ && !graph_nodes_.empty()) {
+        RCLCPP_INFO(node_->get_logger(), "Background: incrementally updating connectivity graph...");
+        updateConnectivityGraphIncremental();
+        graph_dirty_ = false;
+        RCLCPP_INFO(node_->get_logger(), "Background: connectivity graph updated. Nodes=%zu", graph_nodes_.size());
+      } else {
+        RCLCPP_INFO(node_->get_logger(), "Background: rebuilding connectivity graph from scratch...");
+        buildConnectivityGraph();
+        graph_dirty_ = false;
+        RCLCPP_INFO(node_->get_logger(), "Background: connectivity graph ready. Nodes=%zu", graph_nodes_.size());
+      }
     }
   );
 
@@ -1237,63 +1484,117 @@ void AstarOctoPlanner::octomapCallback(const octomap_msgs::msg::Octomap::SharedP
     return;
   }
 
-  octomap::OcTree* tree = dynamic_cast<octomap::OcTree*>(tree_ptr);
-  if (!tree) {
+  octomap::OcTree* incoming_tree = dynamic_cast<octomap::OcTree*>(tree_ptr);
+  if (!incoming_tree) {
     RCLCPP_ERROR(node_->get_logger(), "Octomap message is not an OcTree type");
     delete tree_ptr;
     return;
   }
 
-  // Apply sensor model / occupancy parameters
-  tree->setProbHit(octomap_prob_hit_);
-  tree->setProbMiss(octomap_prob_miss_);
-  tree->setOccupancyThres(octomap_thres_);
-  tree->setClampingThresMin(octomap_clamp_min_);
-  tree->setClampingThresMax(octomap_clamp_max_);
+  // Apply sensor model / occupancy parameters to incoming tree
+  incoming_tree->setProbHit(octomap_prob_hit_);
+  incoming_tree->setProbMiss(octomap_prob_miss_);
+  incoming_tree->setOccupancyThres(octomap_thres_);
+  incoming_tree->setClampingThresMin(octomap_clamp_min_);
+  incoming_tree->setClampingThresMax(octomap_clamp_max_);
 
   // Store the frame id of the incoming map
   map_frame_ = msg->header.frame_id;
 
-  // Replace stored octree (unique_ptr takes ownership)
-  octree_.reset(tree);
+  // Incremental merge: if we already have an octree and incremental mode is enabled,
+  // merge the incoming data into our existing octree instead of replacing it
+  if (incremental_graph_build_ && octree_) {
+    // Merge incoming octree into existing one
+    // Iterate through all leaves in the incoming tree and insert them into our octree
+    size_t merged_count = 0;
+    for (auto it = incoming_tree->begin_leafs(), end = incoming_tree->end_leafs(); it != end; ++it) {
+      octomap::point3d coord = it.getCoordinate();
+      float log_odds = it->getLogOdds();
 
-  // Compute bounds and grid sizes based on occupied leafs
-  double min_x = std::numeric_limits<double>::infinity();
-  double min_y = std::numeric_limits<double>::infinity();
-  double min_z = std::numeric_limits<double>::infinity();
-  double max_x = -std::numeric_limits<double>::infinity();
-  double max_y = -std::numeric_limits<double>::infinity();
-  double max_z = -std::numeric_limits<double>::infinity();
+      // Update the node in our existing octree with the log-odds value
+      octomap::OcTreeNode* node = octree_->updateNode(coord, log_odds > 0);
+      if (node) {
+        node->setLogOdds(log_odds);
+        ++merged_count;
+      }
+    }
+    delete incoming_tree;
+    RCLCPP_DEBUG(node_->get_logger(), "Merged %zu voxels into existing octree", merged_count);
+  } else {
+    // First time or non-incremental mode: replace the octree entirely
+    octree_.reset(incoming_tree);
+    // Clear tracking sets since we're starting fresh
+    processed_occupied_keys_.clear();
+    nodes_needing_adjacency_update_.clear();
+  }
+
+  // Update bounds incrementally: only expand, never shrink
+  active_voxel_size_ = octree_->getResolution();
+  double expand = std::max(1.0, 5.0 * active_voxel_size_); // at least 1 meter margin
+
+  // Start with existing bounds (or initialize if first time)
+  double min_x = min_bound_[0];
+  double min_y = min_bound_[1];
+  double min_z = min_bound_[2];
+  double max_x = max_bound_[0];
+  double max_y = max_bound_[1];
+  double max_z = max_bound_[2];
+
+  // Check if this is the first initialization (bounds still at defaults)
+  bool first_init = (min_x == 0.0 && min_y == 0.0 && min_z == 0.0 &&
+                     max_x == 0.0 && max_y == 0.0 && max_z == 0.0);
+  if (first_init) {
+    min_x = std::numeric_limits<double>::infinity();
+    min_y = std::numeric_limits<double>::infinity();
+    min_z = std::numeric_limits<double>::infinity();
+    max_x = -std::numeric_limits<double>::infinity();
+    max_y = -std::numeric_limits<double>::infinity();
+    max_z = -std::numeric_limits<double>::infinity();
+  }
 
   size_t occupied = 0;
+  size_t new_voxels = 0;
   for (auto it = octree_->begin_leafs(), end = octree_->end_leafs(); it != end; ++it) {
     if (octree_->isNodeOccupied(*it)) {
       auto c = it.getCoordinate();
       double cx = static_cast<double>(c.x());
       double cy = static_cast<double>(c.y());
       double cz = static_cast<double>(c.z());
-      min_x = std::min(min_x, cx);
-      min_y = std::min(min_y, cy);
-      min_z = std::min(min_z, cz);
-      max_x = std::max(max_x, cx);
-      max_y = std::max(max_y, cy);
-      max_z = std::max(max_z, cz);
+
+      // Track new occupied voxels for incremental graph updates
+      char key_buf[128];
+      int ix_mm = static_cast<int>(std::round(cx * 1000.0));
+      int iy_mm = static_cast<int>(std::round(cy * 1000.0));
+      int iz_mm = static_cast<int>(std::round(cz * 1000.0));
+      std::snprintf(key_buf, sizeof(key_buf), "occ_%d_%d_%d", ix_mm, iy_mm, iz_mm);
+      std::string voxel_key(key_buf);
+
+      if (processed_occupied_keys_.find(voxel_key) == processed_occupied_keys_.end()) {
+        // This is a new voxel we haven't processed before
+        ++new_voxels;
+        // Mark the corresponding graph node (to be created) as needing adjacency update
+        double node_z = cz + 0.5 * octree_->getNodeSize(it.getDepth()) + std::max(active_voxel_size_, 0.01);
+        int node_ix_mm = static_cast<int>(std::round(cx * 1000.0));
+        int node_iy_mm = static_cast<int>(std::round(cy * 1000.0));
+        int node_iz_mm = static_cast<int>(std::round(node_z * 1000.0));
+        char node_key_buf[128];
+        std::snprintf(node_key_buf, sizeof(node_key_buf), "c_%d_%d_%d", node_ix_mm, node_iy_mm, node_iz_mm);
+        nodes_needing_adjacency_update_.insert(std::string(node_key_buf));
+      }
+
+      // Expand bounds if needed
+      min_x = std::min(min_x, cx - expand);
+      min_y = std::min(min_y, cy - expand);
+      min_z = std::min(min_z, cz - expand);
+      max_x = std::max(max_x, cx + expand);
+      max_y = std::max(max_y, cy + expand);
+      max_z = std::max(max_z, cz + expand);
       ++occupied;
     }
   }
 
-  if (occupied == 0) {
+  if (occupied == 0 && first_init) {
     RCLCPP_WARN(node_->get_logger(), "Received empty octree (no occupied leaves)");
-  }
-
-  active_voxel_size_ = octree_->getResolution();
-  // If we have occupied leaves, expand bounds slightly to include nearby free space
-  if (occupied > 0) {
-    double expand = std::max(1.0, 5.0 * active_voxel_size_); // at least 1 meter margin
-    min_x -= expand; min_y -= expand; min_z -= expand;
-    max_x += expand; max_y += expand; max_z += expand;
-    //RCLCPP_INFO(node_->get_logger(), "Expanded octomap bounds by %.3f m to include nearby free space.", expand);
-  } else {
     // No occupied leaves — set reasonable default small bounds around origin
     min_x = -1.0; min_y = -1.0; min_z = -1.0;
     max_x =  1.0; max_y =  1.0; max_z =  1.0;
@@ -1307,10 +1608,10 @@ void AstarOctoPlanner::octomapCallback(const octomap_msgs::msg::Octomap::SharedP
   grid_size_y_ = static_cast<int>(std::ceil((max_y - min_y) / active_voxel_size_)) + 1;
   grid_size_z_ = static_cast<int>(std::ceil((max_z - min_z) / active_voxel_size_)) + 1;
 
-  // RCLCPP_INFO(node_->get_logger(), "Received Octomap in frame: %s, resolution: %.3f, occupied leafs: %zu, grid sizes: [%d x %d x %d]",
-  //             map_frame_.c_str(), octree_->getResolution(), occupied, grid_size_x_, grid_size_y_, grid_size_z_);
+  RCLCPP_DEBUG(node_->get_logger(), "Octomap update: frame=%s, resolution=%.3f, total_occupied=%zu, new_voxels=%zu",
+              map_frame_.c_str(), octree_->getResolution(), occupied, new_voxels);
 
-  // Mark graph dirty so background timer will rebuild connectivity graph
+  // Mark graph dirty so background timer will update connectivity graph
   graph_dirty_ = true;
 }
 
@@ -1415,6 +1716,20 @@ rcl_interfaces::msg::SetParametersResult AstarOctoPlanner::reconfigureCallback(s
       } else {
         worker_thread_limit_ = new_limit;
         RCLCPP_INFO(node_->get_logger(), "Updated worker_thread_limit to %d", worker_thread_limit_);
+      }
+    } else if (parameter.get_name() == name_ + ".incremental_graph_build") {
+      bool newval = parameter.as_bool();
+      if (newval != incremental_graph_build_) {
+        incremental_graph_build_ = newval;
+        RCLCPP_INFO_STREAM(node_->get_logger(), "Updated incremental_graph_build to " << incremental_graph_build_);
+        if (!incremental_graph_build_) {
+          // Switching to full rebuild mode: clear tracking sets and mark graph dirty
+          // so the next update does a full rebuild
+          processed_occupied_keys_.clear();
+          nodes_needing_adjacency_update_.clear();
+          graph_dirty_ = true;
+          RCLCPP_INFO(node_->get_logger(), "Cleared incremental tracking state. Next update will do a full rebuild.");
+        }
       }
     }
   }
