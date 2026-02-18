@@ -61,6 +61,11 @@ install(
   DESTINATION share/${PROJECT_NAME}
   FILES_MATCHING PATTERN "*.py"
 )
+install(
+  PROGRAMS
+  bring_up_alert_nav/hw_bridge_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 # Install params
 install(
