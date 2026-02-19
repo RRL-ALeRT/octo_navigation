@@ -40,6 +40,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/header.hpp>
+#include <std_msgs/msg/color_rgba.hpp>
 #include <octomap_msgs/conversions.h>
 
 #include <mbf_msgs/action/get_path.hpp>
@@ -137,27 +138,135 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
       clearOccupiedCylinderAround(start_in_map.pose.position, clear_radius, z_bottom, z_top);
       RCLCPP_INFO(node_->get_logger(), "Cleared occupied voxels around start pose within radius %.3f m and z [%.3f..%.3f]", clear_radius, z_bottom, z_top);
     }
-    // Try to use the precomputed connectivity graph if available. If graph is
-    // missing or yields no route, fall back to a simple two-point plan.
+
+    // --- Double-buffered graph access ---
+    // Get a reference to the active graph. This is a shared_ptr copy, so the
+    // graph remains valid for the duration of this planning call even if the
+    // background thread swaps in a new graph.
+    std::shared_ptr<GraphData> planning_graph;
     {
-      // Ensure graph is built if dirty or empty (build synchronously here).
       std::lock_guard<std::mutex> lock(graph_mutex_);
-      if ((graph_nodes_.empty() || graph_dirty_)) {
-        RCLCPP_INFO(node_->get_logger(), "Graph missing or dirty — building connectivity graph synchronously...");
-        buildConnectivityGraph();
-        graph_dirty_ = false;
-        RCLCPP_INFO(node_->get_logger(), "Graph built: nodes=%zu", graph_nodes_.size());
-      }
+      planning_graph = active_graph_;
     }
 
-    // Find closest graph nodes to start and goal
-    std::string start_id;
-    std::string goal_id;
-    {
-      std::lock_guard<std::mutex> lock(graph_mutex_);
-      start_id = findClosestGraphNode(octomap::point3d(start_world.x, start_world.y, start_world.z));
-      goal_id  = findClosestGraphNode(octomap::point3d(goal_world.x,  goal_world.y,  goal_world.z));
+    // If no active graph exists yet, we must build one synchronously (first call only).
+    // After that, the background thread will keep updating and we'll never block here.
+    if (!planning_graph || planning_graph->empty()) {
+      RCLCPP_INFO(node_->get_logger(), "No active graph available — building connectivity graph synchronously (first time)...");
+      auto new_graph = std::make_shared<GraphData>();
+      buildConnectivityGraphInto(new_graph);
+      {
+        std::lock_guard<std::mutex> lock(graph_mutex_);
+        active_graph_ = new_graph;
+        // Also update legacy members for marker publishing until fully migrated
+        graph_nodes_ = new_graph->nodes;
+        graph_adj_ = new_graph->adj;
+        graph_node_penalty_ = new_graph->node_penalty;
+        graph_penalized_nodes_ = new_graph->penalized_nodes;
+        graph_dirty_ = false;
+      }
+      planning_graph = new_graph;
+      penalties_dirty_ = false; // Full build computed penalties
+      RCLCPP_INFO(node_->get_logger(), "Graph built: nodes=%zu", planning_graph->size());
+    } else if (graph_dirty_) {
+      // Graph is dirty but we have one to use. Log and proceed (background will update).
+      RCLCPP_DEBUG(node_->get_logger(), "Graph is dirty but using existing graph (nodes=%zu). Background rebuild in progress.",
+                   planning_graph->size());
     }
+
+    // --- On-demand penalty/costmap computation ---
+    // Only compute penalties when a plan is actually requested (saves CPU).
+    // This ensures we have a fresh, correct costmap for the current graph state.
+    if (penalties_dirty_ && planning_graph && !planning_graph->nodes.empty()) {
+      RCLCPP_INFO(node_->get_logger(), "Computing penalties/costmap on-demand for %zu nodes...", planning_graph->nodes.size());
+      auto t_pen_start = std::chrono::steady_clock::now();
+
+      // Build node snapshot for neighbor lookups
+      std::vector<std::pair<std::string, GraphNode>> node_snapshot;
+      node_snapshot.reserve(planning_graph->nodes.size());
+      for (const auto &kv : planning_graph->nodes) {
+        node_snapshot.emplace_back(kv.first, kv.second);
+      }
+
+      // Clear and recompute all penalties
+      planning_graph->node_penalty.clear();
+      planning_graph->penalized_nodes.clear();
+
+      for (size_t idx = 0; idx < node_snapshot.size(); ++idx) {
+        const auto& [node_id, node] = node_snapshot[idx];
+        double penalty = 0.0;
+
+        // Centroid-shift detector (k-nearest variant)
+        std::vector<octomap::point3d> nbrs;
+        nbrs.reserve(32);
+        for (const auto &[other_id, other_node] : node_snapshot) {
+          if (other_id == node_id) continue;
+          double dx = other_node.center.x() - node.center.x();
+          double dy = other_node.center.y() - node.center.y();
+          double dxy = std::sqrt(dx*dx + dy*dy);
+          if (dxy <= ransac_radius_) nbrs.push_back(other_node.center);
+        }
+
+        if (nbrs.size() >= 4) {
+          std::sort(nbrs.begin(), nbrs.end(), [&](const octomap::point3d &a, const octomap::point3d &b){
+            double da = std::hypot(a.x()-node.center.x(), a.y()-node.center.y());
+            double db = std::hypot(b.x()-node.center.x(), b.y()-node.center.y());
+            return da < db;
+          });
+          size_t k_use = std::min(static_cast<size_t>(centroid_k_), nbrs.size());
+          double cx=0, cy=0, cz=0;
+          for (size_t ii=0; ii<k_use; ++ii) { cx += nbrs[ii].x(); cy += nbrs[ii].y(); cz += nbrs[ii].z(); }
+          cx /= static_cast<double>(k_use); cy /= static_cast<double>(k_use); cz /= static_cast<double>(k_use);
+          double shift = std::sqrt((cx - node.center.x())*(cx - node.center.x()) +
+                                   (cy - node.center.y())*(cy - node.center.y()) +
+                                   (cz - node.center.z())*(cz - node.center.z()));
+          double Zi = 1e9;
+          for (size_t ii=0; ii<k_use; ++ii) {
+            double dd = std::sqrt((nbrs[ii].x()-node.center.x())*(nbrs[ii].x()-node.center.x()) +
+                                  (nbrs[ii].y()-node.center.y())*(nbrs[ii].y()-node.center.y()) +
+                                  (nbrs[ii].z()-node.center.z())*(nbrs[ii].z()-node.center.z()));
+            Zi = std::min(Zi, dd);
+          }
+          if (Zi < 1e-6) Zi = node.size;
+
+          if (shift > centroid_lambda_ * Zi) {
+            penalty += std::max(0.0, corner_penalty_weight_);
+          } else {
+            // Check bounding box spread
+            double minx=1e9,maxx=-1e9,miny=1e9,maxy=-1e9,minz=1e9,maxz=-1e9;
+            for (size_t ii=0; ii<k_use; ++ii) {
+              double vx = nbrs[ii].x(); double vy = nbrs[ii].y(); double vz = nbrs[ii].z();
+              if (vx < minx) minx = vx; if (vx > maxx) maxx = vx;
+              if (vy < miny) miny = vy; if (vy > maxy) maxy = vy;
+              if (vz < minz) minz = vz; if (vz > maxz) maxz = vz;
+            }
+            int axes = 0; double rho = 0.05;
+            if ((maxx - minx) > rho) ++axes; if ((maxy - miny) > rho) ++axes; if ((maxz - minz) > rho) ++axes;
+            if (axes >= 2) { penalty += 0.5 * centroid_penalty_weight_; }
+          }
+        }
+
+        planning_graph->node_penalty[node_id] = penalty;
+        if (penalty > 1e-9) {
+          planning_graph->penalized_nodes.insert(node_id);
+        }
+      }
+
+      auto t_pen_end = std::chrono::steady_clock::now();
+      double dur_pen = std::chrono::duration_cast<std::chrono::duration<double>>(t_pen_end - t_pen_start).count();
+      RCLCPP_INFO(node_->get_logger(), "Penalty computation took %.3f s", dur_pen);
+
+      // Publish penalty markers now that they're computed
+      if (publish_graph_markers_ && graph_marker_pub_) {
+        publishGraphMarkers(planning_graph);
+      }
+
+      penalties_dirty_ = false;
+    }
+
+    // Find closest graph nodes to start and goal using the planning_graph
+    std::string start_id = findClosestGraphNode(octomap::point3d(start_world.x, start_world.y, start_world.z), planning_graph);
+    std::string goal_id  = findClosestGraphNode(octomap::point3d(goal_world.x,  goal_world.y,  goal_world.z), planning_graph);
 
     RCLCPP_INFO(node_->get_logger(), "Graph attempt: start_id='%s' goal_id='%s'",
                 start_id.empty() ? "<none>" : start_id.c_str(),
@@ -173,14 +282,12 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
 
     bool centers_ok = true;
     if (!start_id.empty()) {
-      std::lock_guard<std::mutex> lock(graph_mutex_);
-      const auto &s = graph_nodes_.at(start_id);
+      const auto &s = planning_graph->nodes.at(start_id);
       RCLCPP_INFO(node_->get_logger(), "Start graph center: (%.3f, %.3f, %.3f)", s.center.x(), s.center.y(), s.center.z());
       centers_ok &= valid_center(s.center);
     }
     if (!goal_id.empty()) {
-      std::lock_guard<std::mutex> lock(graph_mutex_);
-      const auto &g = graph_nodes_.at(goal_id);
+      const auto &g = planning_graph->nodes.at(goal_id);
       RCLCPP_INFO(node_->get_logger(), "Goal graph center: (%.3f, %.3f, %.3f)", g.center.x(), g.center.y(), g.center.z());
       centers_ok &= valid_center(g.center);
     }
@@ -190,20 +297,12 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
       message = "Graph path not available or invalid centers";
       return mbf_msgs::action::GetPath::Result::NO_PATH_FOUND;
     } else {
-      // Compute path on graph with lazy validation (per-plan caches).
-      // Copy graph data under lock so we can run expensive checks without holding the mutex.
-      std::unordered_map<std::string, GraphNode> local_nodes;
-      std::unordered_map<std::string, std::vector<std::string>> local_adj;
-      std::unordered_map<std::string, double> local_node_penalty;
-      std::unordered_set<std::string> local_penalized_nodes;
-      {
-        std::lock_guard<std::mutex> lock(graph_mutex_);
-        local_nodes = graph_nodes_;
-        local_adj = graph_adj_;
-        // copy precomputed penalties
-        local_node_penalty = graph_node_penalty_;
-        local_penalized_nodes = graph_penalized_nodes_;
-      }
+      // Use the planning_graph directly - it's a shared_ptr copy that won't change
+      // during this planning call, even if background thread swaps the active graph.
+      const auto& local_nodes = planning_graph->nodes;
+      const auto& local_adj = planning_graph->adj;
+      const auto& local_node_penalty = planning_graph->node_penalty;
+      const auto& local_penalized_nodes = planning_graph->penalized_nodes;
 
           // Prepare per-plan containers for search and visualization.
           std::unordered_set<std::string> expanded_set;
@@ -222,8 +321,8 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           };
 
           // keep copies using the exact names other code expects for marker publishing
-          std::unordered_map<std::string,double> node_penalty = local_node_penalty;
-          std::unordered_set<std::string> penalized_nodes = local_penalized_nodes;
+          std::unordered_map<std::string,double> node_penalty(local_node_penalty.begin(), local_node_penalty.end());
+          std::unordered_set<std::string> penalized_nodes(local_penalized_nodes.begin(), local_penalized_nodes.end());
 
           auto getPrecomputedPenalty = [&](const std::string &nid)->double{
             auto it = local_node_penalty.find(nid);
@@ -923,6 +1022,20 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
   nodes_needing_adjacency_update_.clear();
 }
 
+void AstarOctoPlanner::buildConnectivityGraphInto(std::shared_ptr<GraphData>& target, double eps)
+{
+  // Build using the existing function (writes to class members as temp storage)
+  buildConnectivityGraph(eps);
+
+  // Copy results to the target GraphData
+  target->nodes = graph_nodes_;
+  target->adj = graph_adj_;
+  target->node_penalty = graph_node_penalty_;
+  target->penalized_nodes = graph_penalized_nodes_;
+  target->processed_occupied_keys = processed_occupied_keys_;
+  target->nodes_needing_adjacency_update = nodes_needing_adjacency_update_;
+}
+
 void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
 {
   auto t_start = std::chrono::steady_clock::now();
@@ -1127,13 +1240,11 @@ void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
   // Clear the pending update set
   nodes_needing_adjacency_update_.clear();
 
-  // Update penalties for new nodes (simplified - just using centroid shift for new nodes)
-  for (const auto& [node_id, node] : new_nodes) {
-    // Start with zero penalty, can be computed more thoroughly if needed
-    graph_node_penalty_[node_id] = 0.0;
-  }
+  // NOTE: Penalties are NOT computed here to save CPU. They will be computed
+  // on-demand when a plan is requested (in makePlan). This avoids wasting
+  // cycles recomputing the costmap every time the graph updates.
 
-  // Publish updated markers
+  // Publish updated markers (nodes only, no penalty markers since they're not computed yet)
   if (publish_graph_markers_) {
     publishGraphMarkers();
   }
@@ -1141,6 +1252,28 @@ void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
   auto t_end = std::chrono::steady_clock::now();
   double dur = std::chrono::duration_cast<std::chrono::duration<double>>(t_end - t_start).count();
   RCLCPP_INFO(node_->get_logger(), "Incremental graph update took %.3f s", dur);
+}
+
+void AstarOctoPlanner::updateConnectivityGraphIncrementalInto(std::shared_ptr<GraphData>& target, double eps)
+{
+  // Copy target's tracking state to class members (so incremental update can use them)
+  processed_occupied_keys_ = target->processed_occupied_keys;
+  nodes_needing_adjacency_update_ = target->nodes_needing_adjacency_update;
+  graph_nodes_ = target->nodes;
+  graph_adj_ = target->adj;
+  graph_node_penalty_ = target->node_penalty;
+  graph_penalized_nodes_ = target->penalized_nodes;
+
+  // Run the incremental update (writes to class members)
+  updateConnectivityGraphIncremental(eps);
+
+  // Copy results back to target
+  target->nodes = graph_nodes_;
+  target->adj = graph_adj_;
+  target->node_penalty = graph_node_penalty_;
+  target->penalized_nodes = graph_penalized_nodes_;
+  target->processed_occupied_keys = processed_occupied_keys_;
+  target->nodes_needing_adjacency_update = nodes_needing_adjacency_update_;
 }
 
 void AstarOctoPlanner::publishGraphMarkers()
@@ -1177,12 +1310,98 @@ void AstarOctoPlanner::publishGraphMarkers()
   //RCLCPP_INFO(node_->get_logger(), "Published graph markers: markers=%zu points=%zu scale=%.3f", ma.markers.size(), ma.markers.empty() ? 0 : ma.markers[0].points.size(), scale);
 }
 
+void AstarOctoPlanner::publishGraphMarkers(const std::shared_ptr<GraphData>& graph)
+{
+  if (!graph_marker_pub_ || !graph || graph->nodes.empty()) return;
+  visualization_msgs::msg::MarkerArray ma;
+
+  // Graph nodes marker (green)
+  visualization_msgs::msg::Marker m;
+  m.header.frame_id = map_frame_.empty() ? "map" : map_frame_;
+  m.header.stamp = node_->now();
+  m.ns = "graph_nodes";
+  m.id = 0;
+  m.type = visualization_msgs::msg::Marker::CUBE_LIST;
+  m.action = visualization_msgs::msg::Marker::ADD;
+  double scale = active_voxel_size_ > 0.0 ? std::max(active_voxel_size_, 0.05) : 0.05;
+  m.scale.x = static_cast<float>(scale);
+  m.scale.y = static_cast<float>(scale);
+  m.scale.z = static_cast<float>(scale);
+  m.color.r = 0.0f;
+  m.color.g = 1.0f;
+  m.color.b = 0.0f;
+  m.color.a = 0.8f;
+
+  for (const auto &kv : graph->nodes) {
+    geometry_msgs::msg::Point p;
+    p.x = kv.second.center.x();
+    p.y = kv.second.center.y();
+    p.z = kv.second.center.z();
+    m.points.push_back(p);
+  }
+  ma.markers.push_back(m);
+
+  // Penalty markers (red/green gradient based on penalty value)
+  visualization_msgs::msg::Marker pen_m;
+  pen_m.header.frame_id = map_frame_.empty() ? "map" : map_frame_;
+  pen_m.header.stamp = node_->now();
+  pen_m.ns = "graph_penalty";
+  pen_m.id = 3;
+  pen_m.type = visualization_msgs::msg::Marker::CUBE_LIST;
+  pen_m.action = visualization_msgs::msg::Marker::ADD;
+  pen_m.scale.x = static_cast<float>(scale);
+  pen_m.scale.y = static_cast<float>(scale);
+  pen_m.scale.z = static_cast<float>(scale);
+
+  for (const auto &kv : graph->node_penalty) {
+    double pen = kv.second;
+    if (pen <= 1e-6) continue;
+    auto itn = graph->nodes.find(kv.first);
+    if (itn == graph->nodes.end()) continue;
+    geometry_msgs::msg::Point p;
+    p.x = itn->second.center.x();
+    p.y = itn->second.center.y();
+    p.z = itn->second.center.z();
+    pen_m.points.push_back(p);
+    // color ramp: low green -> high red
+    std_msgs::msg::ColorRGBA c;
+    double v = std::min(1.0, pen / std::max(1e-6, corner_penalty_weight_));
+    c.r = static_cast<float>(v);
+    c.g = static_cast<float>(1.0 - v);
+    c.b = 0.0f;
+    c.a = 0.9f;
+    pen_m.colors.push_back(c);
+  }
+  if (!pen_m.points.empty()) {
+    ma.markers.push_back(pen_m);
+  }
+
+  graph_marker_pub_->publish(ma);
+  RCLCPP_DEBUG(node_->get_logger(), "Published graph markers: nodes=%zu, penalty_nodes=%zu",
+               m.points.size(), pen_m.points.size());
+}
+
 std::string AstarOctoPlanner::findClosestGraphNode(const octomap::point3d& p) const
 {
   if (graph_nodes_.empty()) return std::string();
   double best = std::numeric_limits<double>::infinity();
   std::string best_id;
   for (const auto &kv : graph_nodes_) {
+    double dx = kv.second.center.x() - p.x();
+    double dy = kv.second.center.y() - p.y();
+    double dz = kv.second.center.z() - p.z();
+    double d = dx*dx + dy*dy + dz*dz;
+    if (d < best) { best = d; best_id = kv.first; }
+  }
+  return best_id;
+}
+
+std::string AstarOctoPlanner::findClosestGraphNode(const octomap::point3d& p, const std::shared_ptr<GraphData>& graph) const
+{
+  if (!graph || graph->nodes.empty()) return std::string();
+  double best = std::numeric_limits<double>::infinity();
+  std::string best_id;
+  for (const auto &kv : graph->nodes) {
     double dx = kv.second.center.x() - p.x();
     double dy = kv.second.center.y() - p.y();
     double dz = kv.second.center.z() - p.z();
@@ -1419,27 +1638,80 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(
       std::bind(&AstarOctoPlanner::reconfigureCallback, this, std::placeholders::_1));
 
-  // Create a periodic timer to (re)build the connectivity graph in background
+  // Create a periodic timer to (re)build the connectivity graph in background.
+  // Uses double-buffering: build into a new graph, then swap pointers atomically.
+  // This ensures makePlan() always has access to a valid graph (never blocks).
   graph_build_timer_ = node_->create_wall_timer(
     std::chrono::seconds(1),
     [this]() {
       if (!enable_octomap_updates_) return; // do nothing when updates disabled
       if (!graph_dirty_) return;
-      std::lock_guard<std::mutex> lock(graph_mutex_);
-      if (!graph_dirty_) return;
+      // Avoid concurrent builds
+      bool expected = false;
+      if (!graph_building_.compare_exchange_strong(expected, true)) {
+        RCLCPP_DEBUG(node_->get_logger(), "Background graph build already in progress, skipping.");
+        return;
+      }
+
+      // Build into a new graph (does NOT hold the mutex during the expensive work)
+      auto new_graph = std::make_shared<GraphData>();
+
+      // Copy incremental tracking state from the active graph (if any) so we can
+      // do incremental updates. This is a brief lock just to copy the tracking sets.
+      std::shared_ptr<GraphData> current_graph;
+      {
+        std::lock_guard<std::mutex> lock(graph_mutex_);
+        current_graph = active_graph_;
+      }
 
       // Use incremental update if we have an existing graph and incremental mode is enabled
-      if (incremental_graph_build_ && !graph_nodes_.empty()) {
+      if (incremental_graph_build_ && current_graph && !current_graph->empty()) {
+        // Start from a copy of the current graph for incremental update
+        new_graph->nodes = current_graph->nodes;
+        new_graph->adj = current_graph->adj;
+        new_graph->node_penalty = current_graph->node_penalty;
+        new_graph->penalized_nodes = current_graph->penalized_nodes;
+        new_graph->processed_occupied_keys = current_graph->processed_occupied_keys;
+        new_graph->nodes_needing_adjacency_update = current_graph->nodes_needing_adjacency_update;
+
         RCLCPP_INFO(node_->get_logger(), "Background: incrementally updating connectivity graph...");
-        updateConnectivityGraphIncremental();
-        graph_dirty_ = false;
-        RCLCPP_INFO(node_->get_logger(), "Background: connectivity graph updated. Nodes=%zu", graph_nodes_.size());
+        updateConnectivityGraphIncrementalInto(new_graph);
+        RCLCPP_INFO(node_->get_logger(), "Background: connectivity graph updated. Nodes=%zu", new_graph->size());
+
+        // Mark penalties as dirty - they'll be computed on next plan request
+        penalties_dirty_ = true;
       } else {
         RCLCPP_INFO(node_->get_logger(), "Background: rebuilding connectivity graph from scratch...");
-        buildConnectivityGraph();
-        graph_dirty_ = false;
-        RCLCPP_INFO(node_->get_logger(), "Background: connectivity graph ready. Nodes=%zu", graph_nodes_.size());
+        buildConnectivityGraphInto(new_graph);
+        RCLCPP_INFO(node_->get_logger(), "Background: connectivity graph ready. Nodes=%zu", new_graph->size());
+        // Full rebuild computes penalties, so they're valid
+        penalties_dirty_ = false;
       }
+
+      // Atomic swap: only hold mutex briefly to swap the pointer
+      {
+        std::lock_guard<std::mutex> lock(graph_mutex_);
+        active_graph_ = new_graph;
+        // Also update legacy members for marker publishing until fully migrated
+        graph_nodes_ = new_graph->nodes;
+        graph_adj_ = new_graph->adj;
+        graph_node_penalty_ = new_graph->node_penalty;
+        graph_penalized_nodes_ = new_graph->penalized_nodes;
+        processed_occupied_keys_ = new_graph->processed_occupied_keys;
+        nodes_needing_adjacency_update_ = new_graph->nodes_needing_adjacency_update;
+        graph_dirty_ = false;
+      }
+
+      // Only publish markers after a FULL rebuild (which computes penalties).
+      // For incremental updates, skip marker publishing here - they'll be
+      // published when planning happens and penalties are computed on-demand.
+      // Otherwise, we'd overwrite the correct penalty markers with empty ones.
+      if (publish_graph_markers_ && !penalties_dirty_) {
+        publishGraphMarkers(new_graph);
+      }
+
+      graph_building_ = false;
+      RCLCPP_INFO(node_->get_logger(), "Background: graph swap complete, planning can use new graph immediately.");
     }
   );
 
@@ -1731,6 +2003,26 @@ rcl_interfaces::msg::SetParametersResult AstarOctoPlanner::reconfigureCallback(s
           RCLCPP_INFO(node_->get_logger(), "Cleared incremental tracking state. Next update will do a full rebuild.");
         }
       }
+    } else if (parameter.get_name() == name_ + ".corner_penalty_weight") {
+      corner_penalty_weight_ = parameter.as_double();
+      penalties_dirty_ = true; // Mark penalties dirty so they get recomputed on next plan
+      RCLCPP_INFO(node_->get_logger(), "Updated corner_penalty_weight to %.1f (penalties will be recomputed on next plan)", corner_penalty_weight_);
+    } else if (parameter.get_name() == name_ + ".centroid_penalty_weight") {
+      centroid_penalty_weight_ = parameter.as_double();
+      penalties_dirty_ = true; // Mark penalties dirty so they get recomputed on next plan
+      RCLCPP_INFO(node_->get_logger(), "Updated centroid_penalty_weight to %.1f (penalties will be recomputed on next plan)", centroid_penalty_weight_);
+    } else if (parameter.get_name() == name_ + ".ransac_radius") {
+      ransac_radius_ = parameter.as_double();
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated ransac_radius to %.2f (penalties will be recomputed on next plan)", ransac_radius_);
+    } else if (parameter.get_name() == name_ + ".centroid_k") {
+      centroid_k_ = parameter.as_int();
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated centroid_k to %d (penalties will be recomputed on next plan)", centroid_k_);
+    } else if (parameter.get_name() == name_ + ".centroid_lambda") {
+      centroid_lambda_ = parameter.as_double();
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated centroid_lambda to %.2f (penalties will be recomputed on next plan)", centroid_lambda_);
     }
   }
   result.successful = true;

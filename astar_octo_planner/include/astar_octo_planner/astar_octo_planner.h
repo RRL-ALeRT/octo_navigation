@@ -300,20 +300,39 @@ private:
     }
   };
 
-  // Graph containers (id -> node, id -> neighbours)
+  // --- Double-buffered graph data structure ---
+  // All graph data is bundled into this struct, allowing atomic swap between
+  // active (used for planning) and pending (being built in background) buffers.
+  struct GraphData {
+    std::unordered_map<std::string, GraphNode> nodes;
+    std::unordered_map<std::string, std::vector<std::string>> adj;
+    std::unordered_map<std::string, double> node_penalty;
+    std::unordered_set<std::string> penalized_nodes;
+    // Incremental build tracking (only used during build, not during planning)
+    std::unordered_set<std::string> processed_occupied_keys;
+    std::unordered_set<std::string> nodes_needing_adjacency_update;
+
+    bool empty() const { return nodes.empty(); }
+    size_t size() const { return nodes.size(); }
+  };
+
+  // Active graph: always available for planning (never null after first build)
+  std::shared_ptr<GraphData> active_graph_;
+  // Mutex protecting active_graph_ pointer swap
+  std::mutex graph_mutex_;
+
+  // Legacy direct-access members kept for compatibility with existing code paths
+  // (will be migrated to active_graph_ usage over time)
   std::unordered_map<std::string, GraphNode> graph_nodes_;
   std::unordered_map<std::string, std::vector<std::string>> graph_adj_;
-
-  // Cached per-graph penalties (computed when the graph is built). These are
-  // filled in buildConnectivityGraph() and copied into per-plan locals in
-  // makePlan() to avoid expensive repeated detection during A*.
   std::unordered_map<std::string, double> graph_node_penalty_;
   std::unordered_set<std::string> graph_penalized_nodes_;
 
   // Background graph builder members
-  std::mutex graph_mutex_;
   rclcpp::TimerBase::SharedPtr graph_build_timer_;
   std::atomic_bool graph_dirty_{false};
+  std::atomic_bool graph_building_{false}; // True while background build is in progress
+  std::atomic_bool penalties_dirty_{true}; // True when penalties need recomputing (on next plan request)
   // Marker publisher for graph visualization
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr graph_marker_pub_;
   bool publish_graph_markers_ = true;
@@ -327,24 +346,28 @@ private:
   // Octomap topic name (configurable)
   std::string octomap_topic_ = std::string("/navigation/octomap_full");
 
-  // Set of occupied voxel keys already processed (for incremental builds)
+  // Legacy incremental tracking members (now inside GraphData, kept for transition)
   std::unordered_set<std::string> processed_occupied_keys_;
-  // Set of graph node IDs that need adjacency updates (new or affected by new neighbors)
   std::unordered_set<std::string> nodes_needing_adjacency_update_;
 
   // Build a sampling-based connectivity graph over interior empty nodes.
   // eps: small epsilon distance (meters) to sample just outside node boundaries.
+  // If target_graph is provided, builds into that graph; otherwise builds into legacy members.
   void buildConnectivityGraph(double eps = 0.05);
+  void buildConnectivityGraphInto(std::shared_ptr<GraphData>& target, double eps = 0.05);
 
   // Incrementally update the connectivity graph with new voxels.
   // Only processes new occupied voxels and updates affected adjacencies.
   void updateConnectivityGraphIncremental(double eps = 0.05);
+  void updateConnectivityGraphIncrementalInto(std::shared_ptr<GraphData>& target, double eps = 0.05);
 
   // Publish graph nodes as visualization Markers (CUBE_LIST)
   void publishGraphMarkers();
+  void publishGraphMarkers(const std::shared_ptr<GraphData>& graph);
 
   // Find the closest graph node id to a world coordinate (returns empty if none)
   std::string findClosestGraphNode(const octomap::point3d& p) const;
+  std::string findClosestGraphNode(const octomap::point3d& p, const std::shared_ptr<GraphData>& graph) const;
 
   // Plan on the built graph using a simple A* and return a vector of node ids.
   std::vector<std::string> planOnGraph(const std::string& start_id, const std::string& goal_id) const;
