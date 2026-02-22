@@ -166,7 +166,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
         graph_dirty_ = false;
       }
       planning_graph = new_graph;
-      penalties_dirty_ = false; // Full build computed penalties
+      // Penalties will be computed on-demand below (incremental check)
       RCLCPP_INFO(node_->get_logger(), "Graph built: nodes=%zu", planning_graph->size());
     } else if (graph_dirty_) {
       // Graph is dirty but we have one to use. Log and proceed (background will update).
@@ -175,90 +175,110 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
     }
 
     // --- On-demand penalty/costmap computation ---
-    // Only compute penalties when a plan is actually requested (saves CPU).
-    // This ensures we have a fresh, correct costmap for the current graph state.
-    if (penalties_dirty_ && planning_graph && !planning_graph->nodes.empty()) {
-      RCLCPP_INFO(node_->get_logger(), "Computing penalties/costmap on-demand for %zu nodes...", planning_graph->nodes.size());
-      auto t_pen_start = std::chrono::steady_clock::now();
-
-      // Build node snapshot for neighbor lookups
-      std::vector<std::pair<std::string, GraphNode>> node_snapshot;
-      node_snapshot.reserve(planning_graph->nodes.size());
-      for (const auto &kv : planning_graph->nodes) {
-        node_snapshot.emplace_back(kv.first, kv.second);
+    // Two modes:
+    //  1) penalties_dirty_ = true  -> full recompute (param change)
+    //  2) penalties_dirty_ = false -> incremental: only compute for nodes not yet in node_penalty
+    if (planning_graph && !planning_graph->nodes.empty()) {
+      // Collect nodes that don't have a penalty yet (new nodes from incremental builds)
+      std::vector<std::pair<std::string, GraphNode>> nodes_needing_penalty;
+      if (penalties_dirty_) {
+        // Full recompute: all nodes
+        nodes_needing_penalty.reserve(planning_graph->nodes.size());
+        for (const auto &kv : planning_graph->nodes) {
+          nodes_needing_penalty.emplace_back(kv.first, kv.second);
+        }
+        planning_graph->node_penalty.clear();
+        planning_graph->penalized_nodes.clear();
+      } else {
+        // Incremental: only nodes missing from penalty map
+        for (const auto &kv : planning_graph->nodes) {
+          if (planning_graph->node_penalty.find(kv.first) == planning_graph->node_penalty.end()) {
+            nodes_needing_penalty.emplace_back(kv.first, kv.second);
+          }
+        }
       }
 
-      // Clear and recompute all penalties
-      planning_graph->node_penalty.clear();
-      planning_graph->penalized_nodes.clear();
+      if (!nodes_needing_penalty.empty()) {
+        RCLCPP_INFO(node_->get_logger(), "Computing penalties for %zu nodes (%s)...",
+                    nodes_needing_penalty.size(),
+                    penalties_dirty_ ? "full recompute" : "incremental append");
+        auto t_pen_start = std::chrono::steady_clock::now();
 
-      for (size_t idx = 0; idx < node_snapshot.size(); ++idx) {
-        const auto& [node_id, node] = node_snapshot[idx];
-        double penalty = 0.0;
-
-        // Centroid-shift detector (k-nearest variant)
-        std::vector<octomap::point3d> nbrs;
-        nbrs.reserve(32);
-        for (const auto &[other_id, other_node] : node_snapshot) {
-          if (other_id == node_id) continue;
-          double dx = other_node.center.x() - node.center.x();
-          double dy = other_node.center.y() - node.center.y();
-          double dxy = std::sqrt(dx*dx + dy*dy);
-          if (dxy <= ransac_radius_) nbrs.push_back(other_node.center);
+        // Build full node snapshot for neighbor lookups (need all nodes as context)
+        std::vector<std::pair<std::string, GraphNode>> node_snapshot;
+        node_snapshot.reserve(planning_graph->nodes.size());
+        for (const auto &kv : planning_graph->nodes) {
+          node_snapshot.emplace_back(kv.first, kv.second);
         }
 
-        if (nbrs.size() >= 4) {
-          std::sort(nbrs.begin(), nbrs.end(), [&](const octomap::point3d &a, const octomap::point3d &b){
-            double da = std::hypot(a.x()-node.center.x(), a.y()-node.center.y());
-            double db = std::hypot(b.x()-node.center.x(), b.y()-node.center.y());
-            return da < db;
-          });
-          size_t k_use = std::min(static_cast<size_t>(centroid_k_), nbrs.size());
-          double cx=0, cy=0, cz=0;
-          for (size_t ii=0; ii<k_use; ++ii) { cx += nbrs[ii].x(); cy += nbrs[ii].y(); cz += nbrs[ii].z(); }
-          cx /= static_cast<double>(k_use); cy /= static_cast<double>(k_use); cz /= static_cast<double>(k_use);
-          double shift = std::sqrt((cx - node.center.x())*(cx - node.center.x()) +
-                                   (cy - node.center.y())*(cy - node.center.y()) +
-                                   (cz - node.center.z())*(cz - node.center.z()));
-          double Zi = 1e9;
-          for (size_t ii=0; ii<k_use; ++ii) {
-            double dd = std::sqrt((nbrs[ii].x()-node.center.x())*(nbrs[ii].x()-node.center.x()) +
-                                  (nbrs[ii].y()-node.center.y())*(nbrs[ii].y()-node.center.y()) +
-                                  (nbrs[ii].z()-node.center.z())*(nbrs[ii].z()-node.center.z()));
-            Zi = std::min(Zi, dd);
-          }
-          if (Zi < 1e-6) Zi = node.size;
+        for (size_t idx = 0; idx < nodes_needing_penalty.size(); ++idx) {
+          const auto& [node_id, node] = nodes_needing_penalty[idx];
+          double penalty = 0.0;
 
-          if (shift > centroid_lambda_ * Zi) {
-            penalty += std::max(0.0, corner_penalty_weight_);
-          } else {
-            // Check bounding box spread
-            double minx=1e9,maxx=-1e9,miny=1e9,maxy=-1e9,minz=1e9,maxz=-1e9;
+          // Centroid-shift detector (k-nearest variant)
+          std::vector<octomap::point3d> nbrs;
+          nbrs.reserve(32);
+          for (const auto &[other_id, other_node] : node_snapshot) {
+            if (other_id == node_id) continue;
+            double dx = other_node.center.x() - node.center.x();
+            double dy = other_node.center.y() - node.center.y();
+            double dxy = std::sqrt(dx*dx + dy*dy);
+            if (dxy <= ransac_radius_) nbrs.push_back(other_node.center);
+          }
+
+          if (nbrs.size() >= 4) {
+            std::sort(nbrs.begin(), nbrs.end(), [&](const octomap::point3d &a, const octomap::point3d &b){
+              double da = std::hypot(a.x()-node.center.x(), a.y()-node.center.y());
+              double db = std::hypot(b.x()-node.center.x(), b.y()-node.center.y());
+              return da < db;
+            });
+            size_t k_use = std::min(static_cast<size_t>(centroid_k_), nbrs.size());
+            double cx=0, cy=0, cz=0;
+            for (size_t ii=0; ii<k_use; ++ii) { cx += nbrs[ii].x(); cy += nbrs[ii].y(); cz += nbrs[ii].z(); }
+            cx /= static_cast<double>(k_use); cy /= static_cast<double>(k_use); cz /= static_cast<double>(k_use);
+            double shift = std::sqrt((cx - node.center.x())*(cx - node.center.x()) +
+                                     (cy - node.center.y())*(cy - node.center.y()) +
+                                     (cz - node.center.z())*(cz - node.center.z()));
+            double Zi = 1e9;
             for (size_t ii=0; ii<k_use; ++ii) {
-              double vx = nbrs[ii].x(); double vy = nbrs[ii].y(); double vz = nbrs[ii].z();
-              if (vx < minx) minx = vx; if (vx > maxx) maxx = vx;
-              if (vy < miny) miny = vy; if (vy > maxy) maxy = vy;
-              if (vz < minz) minz = vz; if (vz > maxz) maxz = vz;
+              double dd = std::sqrt((nbrs[ii].x()-node.center.x())*(nbrs[ii].x()-node.center.x()) +
+                                    (nbrs[ii].y()-node.center.y())*(nbrs[ii].y()-node.center.y()) +
+                                    (nbrs[ii].z()-node.center.z())*(nbrs[ii].z()-node.center.z()));
+              Zi = std::min(Zi, dd);
             }
-            int axes = 0; double rho = 0.05;
-            if ((maxx - minx) > rho) ++axes; if ((maxy - miny) > rho) ++axes; if ((maxz - minz) > rho) ++axes;
-            if (axes >= 2) { penalty += 0.5 * centroid_penalty_weight_; }
+            if (Zi < 1e-6) Zi = node.size;
+
+            if (shift > centroid_lambda_ * Zi) {
+              penalty += std::max(0.0, corner_penalty_weight_);
+            } else {
+              // Check bounding box spread
+              double minx=1e9,maxx=-1e9,miny=1e9,maxy=-1e9,minz=1e9,maxz=-1e9;
+              for (size_t ii=0; ii<k_use; ++ii) {
+                double vx = nbrs[ii].x(); double vy = nbrs[ii].y(); double vz = nbrs[ii].z();
+                if (vx < minx) minx = vx; if (vx > maxx) maxx = vx;
+                if (vy < miny) miny = vy; if (vy > maxy) maxy = vy;
+                if (vz < minz) minz = vz; if (vz > maxz) maxz = vz;
+              }
+              int axes = 0; double rho = 0.05;
+              if ((maxx - minx) > rho) ++axes; if ((maxy - miny) > rho) ++axes; if ((maxz - minz) > rho) ++axes;
+              if (axes >= 2) { penalty += 0.5 * centroid_penalty_weight_; }
+            }
+          }
+
+          planning_graph->node_penalty[node_id] = penalty;
+          if (penalty > 1e-9) {
+            planning_graph->penalized_nodes.insert(node_id);
           }
         }
 
-        planning_graph->node_penalty[node_id] = penalty;
-        if (penalty > 1e-9) {
-          planning_graph->penalized_nodes.insert(node_id);
+        auto t_pen_end = std::chrono::steady_clock::now();
+        double dur_pen = std::chrono::duration_cast<std::chrono::duration<double>>(t_pen_end - t_pen_start).count();
+        RCLCPP_INFO(node_->get_logger(), "Penalty computation took %.3f s for %zu nodes", dur_pen, nodes_needing_penalty.size());
+
+        // Publish penalty markers now that they're computed
+        if (publish_graph_markers_ && graph_marker_pub_) {
+          publishGraphMarkers(planning_graph);
         }
-      }
-
-      auto t_pen_end = std::chrono::steady_clock::now();
-      double dur_pen = std::chrono::duration_cast<std::chrono::duration<double>>(t_pen_end - t_pen_start).count();
-      RCLCPP_INFO(node_->get_logger(), "Penalty computation took %.3f s", dur_pen);
-
-      // Publish penalty markers now that they're computed
-      if (publish_graph_markers_ && graph_marker_pub_) {
-        publishGraphMarkers(planning_graph);
       }
 
       penalties_dirty_ = false;
@@ -267,6 +287,54 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
     // Find closest graph nodes to start and goal using the planning_graph
     std::string start_id = findClosestGraphNode(octomap::point3d(start_world.x, start_world.y, start_world.z), planning_graph);
     std::string goal_id  = findClosestGraphNode(octomap::point3d(goal_world.x,  goal_world.y,  goal_world.z), planning_graph);
+
+    // Validate start node has walkable neighbors — if not, re-snap to a connected node
+    if (!start_id.empty()) {
+      auto adj_it = planning_graph->adj.find(start_id);
+      bool has_walkable_neighbor = false;
+      if (adj_it != planning_graph->adj.end()) {
+        for (const auto &nb : adj_it->second) {
+          auto nb_it = planning_graph->nodes.find(nb);
+          if (nb_it != planning_graph->nodes.end() && nb_it->second.is_walkable) {
+            has_walkable_neighbor = true;
+            break;
+          }
+        }
+      }
+      if (!has_walkable_neighbor) {
+        RCLCPP_WARN(node_->get_logger(),
+          "Start node %s has no walkable neighbors — searching for a connected start node...", start_id.c_str());
+        // Find the nearest walkable node that has at least 1 walkable neighbor
+        octomap::point3d start_pt(start_world.x, start_world.y, start_world.z);
+        double best_score = std::numeric_limits<double>::infinity();
+        std::string best_connected_id;
+        for (const auto &kv : planning_graph->nodes) {
+          if (!kv.second.is_walkable) continue;
+          // Check this node has at least 1 walkable neighbor
+          auto a_it = planning_graph->adj.find(kv.first);
+          if (a_it == planning_graph->adj.end() || a_it->second.empty()) continue;
+          bool connected = false;
+          for (const auto &nb : a_it->second) {
+            auto nit = planning_graph->nodes.find(nb);
+            if (nit != planning_graph->nodes.end() && nit->second.is_walkable) { connected = true; break; }
+          }
+          if (!connected) continue;
+          double dx = kv.second.center.x() - start_pt.x();
+          double dy = kv.second.center.y() - start_pt.y();
+          double dz = kv.second.center.z() - start_pt.z();
+          double score = dx*dx + dy*dy + dz*dz;
+          if (score < best_score) { best_score = score; best_connected_id = kv.first; }
+        }
+        if (!best_connected_id.empty()) {
+          const auto &cn = planning_graph->nodes.at(best_connected_id);
+          RCLCPP_WARN(node_->get_logger(),
+            "Re-snapped start to connected node %s (%.3f, %.3f, %.3f) dist=%.3f m",
+            best_connected_id.c_str(), cn.center.x(), cn.center.y(), cn.center.z(),
+            std::sqrt(best_score));
+          start_id = best_connected_id;
+        }
+      }
+    }
 
     RCLCPP_INFO(node_->get_logger(), "Graph attempt: start_id='%s' goal_id='%s'",
                 start_id.empty() ? "<none>" : start_id.c_str(),
@@ -353,6 +421,11 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
             if (it_adj == local_adj.end()) continue;
             for (const auto &nb : it_adj->second) {
               if (local_nodes.find(nb) == local_nodes.end()) continue;
+              // Skip non-walkable nodes (walls, narrow ledges) — never route through them
+              if (!local_nodes.at(nb).is_walkable) continue;
+              // Edge collision check: raycast between nodes at robot body height
+              // to prevent paths that cut through walls between two walkable floors
+              if (!isEdgeCollisionFree(local_nodes.at(cur.id).center, local_nodes.at(nb).center)) continue;
               double move_cost = local_nodes.at(cur.id).center.distance(local_nodes.at(nb).center);
               double penalty = getPrecomputedPenalty(nb);
               node_penalty[nb] = penalty;
@@ -370,8 +443,114 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           RCLCPP_INFO(node_->get_logger(), "A* search took %.3f s, expanded=%zu nodes", dur_astar, expanded_set.size());
 
       if (path_ids.empty()) {
-        RCLCPP_WARN(node_->get_logger(), "No path found on graph between %s and %s — aborting (NO_PATH_FOUND)", start_id.c_str(), goal_id.c_str());
+        RCLCPP_WARN(node_->get_logger(), "No full path found on graph between %s and %s", start_id.c_str(), goal_id.c_str());
+
+        // --- Build partial path to the expanded node closest to the goal ---
+        // This lets the user see exactly where the planner gets stuck.
+        std::string closest_to_goal_id;
+        double closest_dist = std::numeric_limits<double>::infinity();
+        const auto& goal_node = local_nodes.at(goal_id);
+        for (const auto& nid : expanded_set) {
+          auto it_n = local_nodes.find(nid);
+          if (it_n == local_nodes.end()) continue;
+          double dx = it_n->second.center.x() - goal_node.center.x();
+          double dy = it_n->second.center.y() - goal_node.center.y();
+          double dz = it_n->second.center.z() - goal_node.center.z();
+          double d = dx*dx + dy*dy + dz*dz;
+          if (d < closest_dist) { closest_dist = d; closest_to_goal_id = nid; }
+        }
+
+        if (!closest_to_goal_id.empty()) {
+          closest_dist = std::sqrt(closest_dist);
+          const auto& closest_node = local_nodes.at(closest_to_goal_id);
+          RCLCPP_WARN(node_->get_logger(),
+            "Partial path: closest expanded node to goal is %s (%.3f, %.3f, %.3f), dist=%.3f m",
+            closest_to_goal_id.c_str(),
+            closest_node.center.x(), closest_node.center.y(), closest_node.center.z(),
+            closest_dist);
+
+          // Reconstruct partial path from start to closest-to-goal node
+          std::vector<std::string> partial_ids;
+          std::string u = closest_to_goal_id;
+          while (came_from.find(u) != came_from.end()) { partial_ids.push_back(u); u = came_from.at(u); }
+          partial_ids.push_back(start_id);
+          std::reverse(partial_ids.begin(), partial_ids.end());
+
+          // Publish partial path for visualization (so user sees where planner gets stuck)
+          nav_msgs::msg::Path partial_msg;
+          partial_msg.header.stamp = node_->now();
+          partial_msg.header.frame_id = path_frame;
+          for (const auto &pid : partial_ids) {
+            const auto &gn = local_nodes.at(pid);
+            geometry_msgs::msg::PoseStamped ps;
+            ps.header.frame_id = path_frame;
+            ps.header.stamp = now;
+            ps.pose.position.x = gn.center.x();
+            ps.pose.position.y = gn.center.y();
+            ps.pose.position.z = gn.center.z();
+            ps.pose.orientation.w = 1.0;
+            partial_msg.poses.push_back(ps);
+          }
+          path_pub_->publish(partial_msg);
+
+          // Publish lifted copy too
+          nav_msgs::msg::Path lifted_partial = partial_msg;
+          for (auto &p : lifted_partial.poses) { p.pose.position.z += 0.5; }
+          body_height_path_pub_->publish(lifted_partial);
+
+          RCLCPP_WARN(node_->get_logger(),
+            "Published partial path (%zu waypoints) to closest reachable node (%.3f m from goal)",
+            partial_ids.size(), closest_dist);
+        }
+
+        // --- Connected-component diagnostic ---
+        size_t start_component_size = expanded_set.size();
+
+        // BFS from goal (raw adjacency, no collision checks) to find its component
+        std::unordered_set<std::string> goal_component;
+        {
+          std::queue<std::string> bfs_q;
+          bfs_q.push(goal_id);
+          goal_component.insert(goal_id);
+          while (!bfs_q.empty()) {
+            std::string u = bfs_q.front(); bfs_q.pop();
+            auto it_a = local_adj.find(u);
+            if (it_a == local_adj.end()) continue;
+            for (const auto &v : it_a->second) {
+              if (local_nodes.find(v) == local_nodes.end()) continue;
+              if (goal_component.insert(v).second) bfs_q.push(v);
+            }
+          }
+        }
+
+        RCLCPP_WARN(node_->get_logger(),
+          "DISCONNECTED GRAPH DIAGNOSTIC:\n"
+          "  Total graph nodes: %zu\n"
+          "  Start component (A* reachable): %zu nodes\n"
+          "  Goal  component (raw adjacency): %zu nodes\n"
+          "  Goal in start component: %s",
+          local_nodes.size(),
+          start_component_size,
+          goal_component.size(),
+          (expanded_set.count(goal_id) > 0) ? "YES" : "NO");
+
+        // Log boundary nodes of start component (low neighbor count = edge of reachable area)
+        size_t boundary_logged = 0;
+        for (const auto &nid : expanded_set) {
+          if (boundary_logged >= 5) break;
+          auto it_a = local_adj.find(nid);
+          size_t adj_count = (it_a != local_adj.end()) ? it_a->second.size() : 0;
+          if (adj_count <= 3) {
+            const auto &nd = local_nodes.at(nid);
+            RCLCPP_WARN(node_->get_logger(),
+              "  Boundary node: %s (%.3f, %.3f, %.3f) adj=%zu",
+              nid.c_str(), nd.center.x(), nd.center.y(), nd.center.z(), adj_count);
+            ++boundary_logged;
+          }
+        }
+
         message = "No path found on graph";
+
         return mbf_msgs::action::GetPath::Result::NO_PATH_FOUND;
       }
 
@@ -388,44 +567,6 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
         p.pose.position.z = gn.center.z();
         p.pose.orientation.w = 1.0;
         plan.push_back(p);
-      }
-
-      // Publish debug markers for expanded nodes that did not end up on the final path
-      if (publish_graph_markers_ && graph_marker_pub_) {
-        // build a set of path node ids for quick lookup
-        std::unordered_set<std::string> path_set(path_ids.begin(), path_ids.end());
-        visualization_msgs::msg::Marker dead_mark;
-  dead_mark.header.frame_id = map_frame_.empty() ? "map" : map_frame_;
-        dead_mark.header.stamp = node_->now();
-        dead_mark.ns = "graph_dead_nodes";
-        dead_mark.id = 1;
-        dead_mark.type = visualization_msgs::msg::Marker::CUBE_LIST;
-        dead_mark.action = visualization_msgs::msg::Marker::ADD;
-        double scale = active_voxel_size_ > 0.0 ? std::max(active_voxel_size_, 0.05) : 0.05;
-        dead_mark.scale.x = static_cast<float>(scale);
-        dead_mark.scale.y = static_cast<float>(scale);
-        dead_mark.scale.z = static_cast<float>(scale);
-        // red
-        dead_mark.color.r = 1.0f;
-        dead_mark.color.g = 0.0f;
-        dead_mark.color.b = 0.0f;
-        dead_mark.color.a = 0.85f;
-        for (const auto &nid : expanded_set) {
-          if (path_set.find(nid) != path_set.end()) continue;
-          // only include expanded nodes that were penalized (i.e. corner/edge)
-          if (penalized_nodes.find(nid) == penalized_nodes.end()) continue;
-          auto itn = local_nodes.find(nid);
-          if (itn == local_nodes.end()) continue;
-          geometry_msgs::msg::Point p;
-          p.x = itn->second.center.x();
-          p.y = itn->second.center.y();
-          p.z = itn->second.center.z();
-          dead_mark.points.push_back(p);
-        }
-  visualization_msgs::msg::MarkerArray ma;
-  ma.markers.push_back(dead_mark);
-  RCLCPP_INFO(node_->get_logger(), "Publishing dead-node markers: points=%zu", dead_mark.points.size());
-  graph_marker_pub_->publish(ma);
       }
 
       // Also publish start/goal markers (yellow) if temporary nodes exist
@@ -528,6 +669,13 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   path_msg.poses = plan;
   path_pub_->publish(path_msg);
 
+  // Publish a Z-lifted copy for visualization (not hidden inside voxels)
+  nav_msgs::msg::Path lifted_msg = path_msg;
+  for (auto &p : lifted_msg.poses) {
+    p.pose.position.z += 0.5;
+  }
+  body_height_path_pub_->publish(lifted_msg);
+
   RCLCPP_INFO_STREAM(node_->get_logger(), "Path found with length: " << cost << " steps");
 
   return mbf_msgs::action::GetPath::Result::SUCCESS;
@@ -557,28 +705,38 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
   std::atomic<size_t> rejected_distance{0};
   std::atomic<size_t> rejected_los{0};
 
-  //Build surface graph from occupied leafs (top face of occupied voxels)
+  //Build graph from ALL occupied leafs (floor surfaces + walls)
   for (auto it = octree_->begin_leafs(), end = octree_->end_leafs(); it != end; ++it) {
     ++total_leafs;
     if (!octree_->isNodeOccupied(*it)) continue;
     ++free_leafs; // reusing counter for occupied samples here
     octomap::point3d occ = it.getCoordinate();
-    double node_z = occ.z() + 0.5 * octree_->getNodeSize(it.getDepth());
-    // nudge node slightly above to be in free space
-    node_z += std::max(active_voxel_size_, 0.01);
+    // Use actual voxel center (no nudge)
+    double node_z = occ.z();
     if (!std::isfinite(occ.x()) || !std::isfinite(occ.y()) || !std::isfinite(node_z)) { ++skipped_nonfinite; continue; }
     if (occ.x() < min_bound_[0] - 1e-6 || occ.x() > max_bound_[0] + 1e-6 ||
         occ.y() < min_bound_[1] - 1e-6 || occ.y() > max_bound_[1] + 1e-6 ||
         node_z < min_bound_[2] - 1e-6 || node_z > max_bound_[2] + 1e-6) { ++skipped_out_of_bounds; continue; }
 
-    // vertical clearance check above surface
+    // vertical clearance check above the voxel top surface to determine walkability
     bool vertical_clear = true;
     double stepz = std::max(active_voxel_size_, 0.05);
-    for (double z = node_z; z <= node_z + robot_height_; z += stepz) {
+    double voxel_top = occ.z() + 0.5 * octree_->getNodeSize(it.getDepth());
+    for (double z = voxel_top + 0.01; z <= voxel_top + robot_height_; z += stepz) {
       octomap::OcTreeNode* nn = octree_->search(occ.x(), occ.y(), z);
       if (nn && octree_->isNodeOccupied(nn)) { vertical_clear = false; break; }
     }
-    if (!vertical_clear) { ++skipped_collision; continue; }
+    // Count but don't skip non-walkable nodes — they're included for visualization
+    if (!vertical_clear) { ++skipped_collision; }
+
+    // Floor support check: verify the surface has enough horizontal extent
+    // (rejects thin wall tops that pass vertical clearance)
+    if (vertical_clear) {
+      double node_sz = octree_->getNodeSize(it.getDepth());
+      if (!hasFloorSupport(occ.x(), occ.y(), occ.z(), node_sz)) {
+        vertical_clear = false; // Mark as non-walkable (wall top / narrow ledge)
+      }
+    }
 
     octomap::point3d center(occ.x(), occ.y(), node_z);
     octomap::OcTreeKey key = octree_->coordToKey(center);
@@ -590,6 +748,7 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
     gn.depth = depth;
     gn.center = center;
     gn.size = size;
+    gn.is_walkable = vertical_clear;  // floor = true, wall = false
 
     // create stable id
     char idbuf[128];
@@ -628,15 +787,6 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
     return std::max(1U, std::min(cap, static_cast<unsigned int>(workload)));
   };
 
-  const std::vector<octomap::point3d> dirs = [](){
-    std::vector<octomap::point3d> d;
-    for (int dx=-1; dx<=1; ++dx) for (int dy=-1; dy<=1; ++dy) for (int dz=-1; dz<=1; ++dz) {
-      if (dx==0 && dy==0 && dz==0) continue;
-      d.emplace_back(dx, dy, dz);
-    }
-    return d;
-  }();
-
   std::vector<std::vector<std::string>> adjacency(node_snapshot.size());
 
   auto add_edge = [&](size_t from_idx, const std::string &neighbor_id) {
@@ -647,133 +797,24 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
     }
   };
 
+  // Simple spatial adjacency: connect nodes within ~1.5 voxel distance
   auto neighbor_worker = [&](size_t start, size_t end) {
     for (size_t idx = start; idx < end; ++idx) {
       const auto &id = node_snapshot[idx].first;
       const GraphNode &node = node_snapshot[idx].second;
-      double node_size = node.size;
-      // Standard 26-neighborhood sampling (original behavior)
-      for (const auto &dir : dirs) {
-        octomap::point3d sample = node.center + dir * (node_size * 0.5 + eps);
-        if (sample.x() < min_bound_[0] - node_size || sample.x() > max_bound_[0] + node_size ||
-            sample.y() < min_bound_[1] - node_size || sample.y() > max_bound_[1] + node_size ||
-            sample.z() < min_bound_[2] - node_size || sample.z() > max_bound_[2] + node_size) {
-          continue;
-        }
-  octomap::OcTreeNode* found = octree_->search(sample.x(), sample.y(), sample.z());
-  if (!found) continue;
-  octomap::OcTreeKey fkey = octree_->coordToKey(sample);
-        octomap::point3d found_center = octree_->keyToCoord(fkey);
-        double best_dist = std::numeric_limits<double>::infinity();
-        size_t best_idx = node_snapshot.size();
-        for (size_t j = 0; j < node_snapshot.size(); ++j) {
-          const auto &cand = node_snapshot[j].second;
-          double dx = cand.center.x() - found_center.x();
-          double dy = cand.center.y() - found_center.y();
-          double dz = cand.center.z() - found_center.z();
-          double dsq = dx*dx + dy*dy + dz*dz;
-          if (dsq < best_dist) { best_dist = dsq; best_idx = j; }
-        }
-        if (best_idx == node_snapshot.size()) continue;
-        const auto &best_id = node_snapshot[best_idx].first;
-        const auto &best_node = node_snapshot[best_idx].second;
-        if (best_node.size + 1e-9 < node_size) continue;
-        double thresh = node_size * 1.5;
-        if (best_dist > thresh * thresh) {
-          ++rejected_distance;
-          continue;
-        }
-        const octomap::point3d &a = node.center;
-        const octomap::point3d &b = best_node.center;
-        octomap::point3d dir_line = b - a;
-        double dist = dir_line.norm();
-        bool hit = false;
-        if (dist > 1e-9) {
-          dir_line /= dist;
-          double step_size = std::max(active_voxel_size_, 0.05);
-          int steps = std::max(1, static_cast<int>(std::ceil(dist / step_size)));
-          for (int si = 1; si < steps; ++si) {
-            double t = static_cast<double>(si) / static_cast<double>(steps);
-            octomap::point3d s = a + dir_line * (dist * t);
-            const double eps_bounds = 1e-6;
-            if (s.x() < min_bound_[0] - eps_bounds || s.x() > max_bound_[0] + eps_bounds ||
-                s.y() < min_bound_[1] - eps_bounds || s.y() > max_bound_[1] + eps_bounds ||
-                s.z() < min_bound_[2] - eps_bounds || s.z() > max_bound_[2] + eps_bounds) continue;
-            octomap::OcTreeNode* nn = octree_->search(s.x(), s.y(), s.z());
-            if (nn && octree_->isNodeOccupied(nn)) { hit = true; break; }
-          }
-        }
-        if (hit) {
-          ++rejected_los;
-          continue;
-        }
-        add_edge(idx, best_id);
-      }
+      double max_dist = node.size * 1.8;  // ~1.8 voxel distance for diagonal neighbors
+      double max_dist_sq = max_dist * max_dist;
 
-      // Optional stair augmentation: search for reachable landings above this node
-      if (enable_stair_edges_) {
-        const double vertical_window = max_step_height_ + stair_vertical_margin_;
-        const double xy_radius = std::max(stair_xy_radius_, active_voxel_size_);
-        octomap::point3d min_bb(node.center.x() - xy_radius,
-          node.center.y() - xy_radius,
-          node.center.z() + 1e-3);
-        octomap::point3d max_bb(node.center.x() + xy_radius,
-          node.center.y() + xy_radius,
-          node.center.z() + vertical_window);
-        for (auto it = octree_->begin_leafs_bbx(min_bb, max_bb);
-          it != octree_->end_leafs_bbx(); ++it)
-        {
-          if (!octree_->isNodeOccupied(*it)) continue;
-          octomap::point3d occ = it.getCoordinate();
-          double landing_z = occ.z() + 0.5 * octree_->getNodeSize(it.getDepth());
-          landing_z += std::max(active_voxel_size_, 0.01);
-          double dz = landing_z - node.center.z();
-          if (dz <= 1e-3 || dz > vertical_window) continue;
-          double dx = std::fabs(occ.x() - node.center.x());
-          double dy = std::fabs(occ.y() - node.center.y());
-          if (dx > xy_radius || dy > xy_radius) continue;
-
-          octomap::point3d landing_center(occ.x(), occ.y(), landing_z);
-          double dist = landing_center.distance(node.center);
-          if (dist <= 1e-6 || dist > vertical_window + xy_radius) continue;
-          octomap::point3d dir_line = landing_center - node.center;
-          bool blocked = false;
-          double step_size = std::max(active_voxel_size_, 0.05);
-          int steps = std::max(1, static_cast<int>(std::ceil(dist / step_size)));
-          for (int si = 1; si < steps; ++si)
-          {
-            double t = static_cast<double>(si) / static_cast<double>(steps);
-            octomap::point3d s = node.center + dir_line * t;
-            octomap::OcTreeNode* nn = octree_->search(s.x(), s.y(), s.z());
-            if (nn && octree_->isNodeOccupied(nn))
-            {
-              blocked = true;
-              break;
-            }
-          }
-          if (blocked) continue;
-
-            octomap::OcTreeKey landing_key = octree_->coordToKey(landing_center);
-            auto landing_node_it = std::find_if(node_snapshot.begin(), node_snapshot.end(),
-              [&](const auto &pair) {
-                if (pair.second.key == landing_key)
-                {
-                  return true;
-                }
-                const auto &cand_center = pair.second.center;
-                double dx_c = std::fabs(cand_center.x() - landing_center.x());
-                double dy_c = std::fabs(cand_center.y() - landing_center.y());
-                double dz_c = std::fabs(cand_center.z() - landing_center.z());
-                return dx_c <= active_voxel_size_ && dy_c <= active_voxel_size_ && dz_c <= active_voxel_size_;
-              });
-            if (landing_node_it == node_snapshot.end())
-            {
-              continue;
-            }
-
-            auto landing_idx = static_cast<size_t>(landing_node_it - node_snapshot.begin());
-            add_edge(idx, landing_node_it->first);
-            add_edge(landing_idx, id);
+      // Check all other nodes for proximity
+      for (size_t j = 0; j < node_snapshot.size(); ++j) {
+        if (j == idx) continue;
+        const GraphNode &other = node_snapshot[j].second;
+        double dx = other.center.x() - node.center.x();
+        double dy = other.center.y() - node.center.y();
+        double dz = other.center.z() - node.center.z();
+        double dist_sq = dx*dx + dy*dy + dz*dz;
+        if (dist_sq <= max_dist_sq) {
+          add_edge(idx, node_snapshot[j].first);
         }
       }
     }
@@ -869,138 +910,11 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
   double dur_graph_structure = std::chrono::duration_cast<std::chrono::duration<double>>(t_graph_structure_end - t_graph_start).count();
   RCLCPP_INFO(node_->get_logger(), "Graph build (structure only) took %.3f s (nodes=%zu)", dur_graph_structure, graph_nodes_.size());
 
-  // ---------------------------------------------------------------------------
-  // Precompute base node penalties for the whole graph. This avoids recomputing
-  // expensive detectors during A* and stabilizes visualization. We compute only
-  // base penalties here (no spread/inflation)
+  // Penalties are NOT computed here — they are computed on-demand when a path
+  // is requested (in makePlan). This keeps the graph build fast and allows
+  // incremental penalty computation for new nodes only.
   graph_node_penalty_.clear();
   graph_penalized_nodes_.clear();
-
-  if (node_snapshot.empty()) {
-    RCLCPP_INFO(node_->get_logger(), "Penalty computation skipped (no nodes)");
-  } else {
-    auto t_pen_start = std::chrono::steady_clock::now();
-
-  std::vector<double> penalties(node_snapshot.size(), 0.0);
-  std::vector<bool> penalized(node_snapshot.size(), false);
-  std::vector<bool> spread_sources(node_snapshot.size(), false);
-
-    auto compute_penalty = [&](size_t idx) {
-  const auto &nid = node_snapshot[idx].first;
-  const auto &n = node_snapshot[idx].second;
-  double penalty = 0.0;
-  bool corner_like = false;
-
-      // centroid-shift detector (k-nearest variant)
-      std::vector<octomap::point3d> nbrs;
-      nbrs.reserve(32);
-      for (size_t j = 0; j < node_snapshot.size(); ++j) {
-        if (j == idx) continue;
-        const auto &nj = node_snapshot[j].second;
-        double dx = nj.center.x() - n.center.x();
-        double dy = nj.center.y() - n.center.y();
-        double dxy = std::sqrt(dx*dx + dy*dy);
-        if (dxy <= ransac_radius_) nbrs.push_back(nj.center);
-      }
-      if (nbrs.size() >= 4) {
-        std::sort(nbrs.begin(), nbrs.end(), [&](const octomap::point3d &a, const octomap::point3d &b){
-          double da = std::hypot(a.x()-n.center.x(), a.y()-n.center.y());
-          double db = std::hypot(b.x()-n.center.x(), b.y()-n.center.y());
-          return da < db;
-        });
-        size_t k_use = std::min(static_cast<size_t>(centroid_k_), nbrs.size());
-        double cx=0, cy=0, cz=0;
-        for (size_t ii=0; ii<k_use; ++ii) { cx += nbrs[ii].x(); cy += nbrs[ii].y(); cz += nbrs[ii].z(); }
-        cx /= static_cast<double>(k_use); cy /= static_cast<double>(k_use); cz /= static_cast<double>(k_use);
-        double shift = std::sqrt((cx - n.center.x())*(cx - n.center.x()) + (cy - n.center.y())*(cy - n.center.y()) + (cz - n.center.z())*(cz - n.center.z()));
-        double Zi = 1e9; for (size_t ii=0; ii<k_use; ++ii) {
-          double dd = std::sqrt((nbrs[ii].x()-n.center.x())*(nbrs[ii].x()-n.center.x()) + (nbrs[ii].y()-n.center.y())*(nbrs[ii].y()-n.center.y()) + (nbrs[ii].z()-n.center.z())*(nbrs[ii].z()-n.center.z()));
-          Zi = std::min(Zi, dd);
-        }
-        if (Zi < 1e-6) Zi = n.size;
-        if (shift > centroid_lambda_ * Zi) {
-          penalty += std::max(0.0, corner_penalty_weight_);
-          corner_like = true;
-        } else {
-          double minx=1e9,maxx=-1e9,miny=1e9,maxy=-1e9,minz=1e9,maxz=-1e9;
-          for (size_t ii=0; ii<k_use; ++ii) {
-            double vx = nbrs[ii].x(); double vy = nbrs[ii].y(); double vz = nbrs[ii].z();
-            if (vx < minx) minx = vx; if (vx > maxx) maxx = vx;
-            if (vy < miny) miny = vy; if (vy > maxy) maxy = vy;
-            if (vz < minz) minz = vz; if (vz > maxz) maxz = vz;
-          }
-          int axes = 0; double rho = 0.05;
-          if ((maxx - minx) > rho) ++axes; if ((maxy - miny) > rho) ++axes; if ((maxz - minz) > rho) ++axes;
-          if (axes >= 2) { penalty += 0.5 * centroid_penalty_weight_; }
-        }
-      }
-
-      penalties[idx] = penalty;
-      penalized[idx] = penalty > 1e-9;
-      if (corner_like) spread_sources[idx] = true;
-    };
-
-    auto worker = [&](size_t start, size_t end) {
-      for (size_t idx = start; idx < end; ++idx) {
-        compute_penalty(idx);
-      }
-    };
-
-    unsigned int num_threads = pick_thread_count(node_snapshot.size());
-    if (num_threads == 0) num_threads = 1;
-
-    if (num_threads == 1) {
-      worker(0, node_snapshot.size());
-    } else {
-      size_t chunk = (node_snapshot.size() + num_threads - 1) / num_threads;
-      std::vector<std::thread> threads;
-      threads.reserve(num_threads);
-      for (unsigned int t = 0; t < num_threads; ++t) {
-        size_t start = t * chunk;
-        if (start >= node_snapshot.size()) break;
-        size_t end = std::min(start + chunk, node_snapshot.size());
-        threads.emplace_back(worker, start, end);
-      }
-      for (auto &th : threads) {
-        if (th.joinable()) th.join();
-      }
-    }
-    //  Apply penalty spread from corner-like nodes to their neighbors
-    if (penalty_spread_radius_ > 1e-6 && penalty_spread_factor_ > 1e-6) {
-      const double max_radius = penalty_spread_radius_;
-      for (size_t src = 0; src < node_snapshot.size(); ++src) {
-        double base_pen = penalties[src];
-        if (base_pen <= 1e-9) continue;
-        if (!spread_sources[src]) continue;
-        for (size_t nb_idx : neighbor_indices[src]) {
-          const auto &a = node_snapshot[src].second.center;
-          const auto &b = node_snapshot[nb_idx].second.center;
-          double dist = a.distance(b);
-          if (!std::isfinite(dist)) continue;
-          if (dist > max_radius) continue;
-          double atten = 1.0 - (dist / max_radius);
-          if (atten < 0.0) atten = 0.0;
-          double addition = base_pen * penalty_spread_factor_ * atten;
-          if (addition <= 0.0) continue;
-          penalties[nb_idx] += addition;
-          penalized[nb_idx] = true;
-        }
-      }
-    }
-
-    for (size_t idx = 0; idx < node_snapshot.size(); ++idx) {
-      const auto &nid = node_snapshot[idx].first;
-      double penalty = penalties[idx];
-      graph_node_penalty_[nid] = penalty;
-      if (penalized[idx]) {
-        graph_penalized_nodes_.insert(nid);
-      }
-    }
-
-    auto t_pen_end = std::chrono::steady_clock::now();
-    double dur_pen = std::chrono::duration_cast<std::chrono::duration<double>>(t_pen_end - t_pen_start).count();
-    RCLCPP_INFO(node_->get_logger(), "Penalty computation took %.3f s using %u thread(s)", dur_pen, std::max(1U, num_threads));
-  }
 
   auto t_graph_end = std::chrono::steady_clock::now();
   double dur_graph_total = std::chrono::duration_cast<std::chrono::duration<double>>(t_graph_end - t_graph_start).count();
@@ -1027,11 +941,11 @@ void AstarOctoPlanner::buildConnectivityGraphInto(std::shared_ptr<GraphData>& ta
   // Build using the existing function (writes to class members as temp storage)
   buildConnectivityGraph(eps);
 
-  // Copy results to the target GraphData
+  // Copy structure results to the target GraphData (no penalties — computed on-demand)
   target->nodes = graph_nodes_;
   target->adj = graph_adj_;
-  target->node_penalty = graph_node_penalty_;
-  target->penalized_nodes = graph_penalized_nodes_;
+  target->node_penalty.clear();
+  target->penalized_nodes.clear();
   target->processed_occupied_keys = processed_occupied_keys_;
   target->nodes_needing_adjacency_update = nodes_needing_adjacency_update_;
 }
@@ -1071,26 +985,34 @@ void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
 
   RCLCPP_INFO(node_->get_logger(), "Incremental update: processing %zu new voxels", new_voxels.size());
 
-  // Create graph nodes for each new occupied voxel (surface nodes above occupied cells)
+  // Create graph nodes for each new occupied voxel (at actual voxel center position)
   std::vector<std::pair<std::string, GraphNode>> new_nodes;
 
   for (const auto& [occ, key, depth, node_size] : new_voxels) {
-    double node_z = occ.z() + 0.5 * node_size;
-    node_z += std::max(active_voxel_size_, 0.01);
+    // Use actual voxel center (no z-shift)
+    double node_z = occ.z();
 
     if (!std::isfinite(occ.x()) || !std::isfinite(occ.y()) || !std::isfinite(node_z)) continue;
     if (occ.x() < min_bound_[0] - 1e-6 || occ.x() > max_bound_[0] + 1e-6 ||
         occ.y() < min_bound_[1] - 1e-6 || occ.y() > max_bound_[1] + 1e-6 ||
         node_z < min_bound_[2] - 1e-6 || node_z > max_bound_[2] + 1e-6) continue;
 
-    // Vertical clearance check above surface
+    // Vertical clearance check above voxel top surface
     bool vertical_clear = true;
     double stepz = std::max(active_voxel_size_, 0.05);
-    for (double z = node_z; z <= node_z + robot_height_; z += stepz) {
+    double voxel_top = occ.z() + 0.5 * node_size;
+    for (double z = voxel_top + 0.01; z <= voxel_top + robot_height_; z += stepz) {
       octomap::OcTreeNode* nn = octree_->search(occ.x(), occ.y(), z);
       if (nn && octree_->isNodeOccupied(nn)) { vertical_clear = false; break; }
     }
-    if (!vertical_clear) continue;
+    // Include non-walkable voxels in graph for visualization (A* skips them)
+
+    // Floor support check: verify the surface has enough horizontal extent
+    if (vertical_clear) {
+      if (!hasFloorSupport(occ.x(), occ.y(), occ.z(), node_size)) {
+        vertical_clear = false; // wall top / narrow ledge
+      }
+    }
 
     octomap::point3d center(occ.x(), occ.y(), node_z);
     octomap::OcTreeKey center_key = octree_->coordToKey(center);
@@ -1100,6 +1022,7 @@ void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
     gn.depth = depth;
     gn.center = center;
     gn.size = node_size;
+    gn.is_walkable = vertical_clear;  // floor = true, wall = false
 
     // Create stable id
     char idbuf[128];
@@ -1145,7 +1068,8 @@ void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
   }
 
   // Also include existing nodes that are close to new nodes (they may need new edges)
-  double neighbor_search_radius = active_voxel_size_ * 3.0; // Search nearby existing nodes
+  // Use a generous radius to avoid connectivity gaps between incremental batches
+  double neighbor_search_radius = active_voxel_size_ * 5.0; // Search nearby existing nodes (increased from 3.0)
   for (const auto& [new_id, new_node] : new_nodes) {
     for (const auto& [existing_id, existing_node] : graph_nodes_) {
       if (existing_id == new_id) continue;
@@ -1200,7 +1124,8 @@ void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
 
       if (best_id.empty() || best_id == node_id) continue;
 
-      double thresh = node.size * 1.5;
+      // Match the full-build distance threshold (1.8x) to avoid connectivity gaps
+      double thresh = node.size * 1.8;
       if (best_dist > thresh * thresh) continue;
 
       // Line-of-sight check
@@ -1235,6 +1160,28 @@ void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
         reverse_adj.push_back(node_id);
       }
     }
+
+    // --- Direct distance-based adjacency (octree-independent) ---
+    // Mirror the full-build approach: connect to ANY graph node within 1.8x
+    // voxel distance. This ensures connectivity even when the octree has
+    // been cleared (e.g. by clearOccupiedCylinderAround) or has gaps.
+    double max_dist_sq = (node.size * 1.8) * (node.size * 1.8);
+    for (const auto& [cand_id, cand_node] : all_nodes_snapshot) {
+      if (cand_id == node_id) continue;
+      double dx = cand_node.center.x() - node.center.x();
+      double dy = cand_node.center.y() - node.center.y();
+      double dz = cand_node.center.z() - node.center.z();
+      double dsq = dx*dx + dy*dy + dz*dz;
+      if (dsq > max_dist_sq) continue;
+      // Add edge if not already present (skip LOS check, matching full build)
+      if (std::find(adj.begin(), adj.end(), cand_id) == adj.end()) {
+        adj.push_back(cand_id);
+      }
+      auto& rev = graph_adj_[cand_id];
+      if (std::find(rev.begin(), rev.end(), node_id) == rev.end()) {
+        rev.push_back(node_id);
+      }
+    }
   }
 
   // Clear the pending update set
@@ -1261,17 +1208,14 @@ void AstarOctoPlanner::updateConnectivityGraphIncrementalInto(std::shared_ptr<Gr
   nodes_needing_adjacency_update_ = target->nodes_needing_adjacency_update;
   graph_nodes_ = target->nodes;
   graph_adj_ = target->adj;
-  graph_node_penalty_ = target->node_penalty;
-  graph_penalized_nodes_ = target->penalized_nodes;
+  // Don't copy penalties — they are not computed during graph build
 
   // Run the incremental update (writes to class members)
   updateConnectivityGraphIncremental(eps);
 
-  // Copy results back to target
+  // Copy structure results back to target (no penalties)
   target->nodes = graph_nodes_;
   target->adj = graph_adj_;
-  target->node_penalty = graph_node_penalty_;
-  target->penalized_nodes = graph_penalized_nodes_;
   target->processed_occupied_keys = processed_occupied_keys_;
   target->nodes_needing_adjacency_update = nodes_needing_adjacency_update_;
 }
@@ -1280,6 +1224,8 @@ void AstarOctoPlanner::publishGraphMarkers()
 {
   if (!graph_marker_pub_ || graph_nodes_.empty()) return;
   visualization_msgs::msg::MarkerArray ma;
+
+  // All graph nodes marker (green)
   visualization_msgs::msg::Marker m;
   m.header.frame_id = map_frame_.empty() ? "map" : map_frame_;
   m.header.stamp = node_->now();
@@ -1287,12 +1233,10 @@ void AstarOctoPlanner::publishGraphMarkers()
   m.id = 0;
   m.type = visualization_msgs::msg::Marker::CUBE_LIST;
   m.action = visualization_msgs::msg::Marker::ADD;
-  // set scale for cubes (use node size or default to active voxel size if available)
   double scale = active_voxel_size_ > 0.0 ? std::max(active_voxel_size_, 0.05) : 0.05;
   m.scale.x = static_cast<float>(scale);
   m.scale.y = static_cast<float>(scale);
   m.scale.z = static_cast<float>(scale);
-  // color
   m.color.r = 0.0f;
   m.color.g = 1.0f;
   m.color.b = 0.0f;
@@ -1304,10 +1248,17 @@ void AstarOctoPlanner::publishGraphMarkers()
     p.y = kv.second.center.y();
     p.z = kv.second.center.z();
     m.points.push_back(p);
+    // Color per node: green = walkable, red = non-walkable (wall/obstacle)
+    std_msgs::msg::ColorRGBA c;
+    if (kv.second.is_walkable) {
+      c.r = 0.0f; c.g = 1.0f; c.b = 0.0f; c.a = 0.8f;
+    } else {
+      c.r = 1.0f; c.g = 0.0f; c.b = 0.0f; c.a = 0.8f;
+    }
+    m.colors.push_back(c);
   }
   ma.markers.push_back(m);
   graph_marker_pub_->publish(ma);
-  //RCLCPP_INFO(node_->get_logger(), "Published graph markers: markers=%zu points=%zu scale=%.3f", ma.markers.size(), ma.markers.empty() ? 0 : ma.markers[0].points.size(), scale);
 }
 
 void AstarOctoPlanner::publishGraphMarkers(const std::shared_ptr<GraphData>& graph)
@@ -1315,7 +1266,7 @@ void AstarOctoPlanner::publishGraphMarkers(const std::shared_ptr<GraphData>& gra
   if (!graph_marker_pub_ || !graph || graph->nodes.empty()) return;
   visualization_msgs::msg::MarkerArray ma;
 
-  // Graph nodes marker (green)
+  // All graph nodes marker — green=walkable, red=non-walkable
   visualization_msgs::msg::Marker m;
   m.header.frame_id = map_frame_.empty() ? "map" : map_frame_;
   m.header.stamp = node_->now();
@@ -1327,6 +1278,7 @@ void AstarOctoPlanner::publishGraphMarkers(const std::shared_ptr<GraphData>& gra
   m.scale.x = static_cast<float>(scale);
   m.scale.y = static_cast<float>(scale);
   m.scale.z = static_cast<float>(scale);
+  // Default color (overridden per point below)
   m.color.r = 0.0f;
   m.color.g = 1.0f;
   m.color.b = 0.0f;
@@ -1338,6 +1290,14 @@ void AstarOctoPlanner::publishGraphMarkers(const std::shared_ptr<GraphData>& gra
     p.y = kv.second.center.y();
     p.z = kv.second.center.z();
     m.points.push_back(p);
+    // Color per node: green = walkable, red = non-walkable (wall/obstacle)
+    std_msgs::msg::ColorRGBA c;
+    if (kv.second.is_walkable) {
+      c.r = 0.0f; c.g = 1.0f; c.b = 0.0f; c.a = 0.8f;
+    } else {
+      c.r = 1.0f; c.g = 0.0f; c.b = 0.0f; c.a = 0.8f;
+    }
+    m.colors.push_back(c);
   }
   ma.markers.push_back(m);
 
@@ -1386,12 +1346,37 @@ std::string AstarOctoPlanner::findClosestGraphNode(const octomap::point3d& p) co
   if (graph_nodes_.empty()) return std::string();
   double best = std::numeric_limits<double>::infinity();
   std::string best_id;
+  // First pass: find candidates within XY radius, prefer lowest z (floor)
+  const double xy_search_radius = 1.0;  // 1m XY search radius
+  const double max_z_above_query = 0.3; // Only consider nodes up to 30cm above query point
+
   for (const auto &kv : graph_nodes_) {
+    // Only consider walkable nodes for path planning
+    if (!kv.second.is_walkable) continue;
     double dx = kv.second.center.x() - p.x();
     double dy = kv.second.center.y() - p.y();
-    double dz = kv.second.center.z() - p.z();
-    double d = dx*dx + dy*dy + dz*dz;
-    if (d < best) { best = d; best_id = kv.first; }
+    double dxy_sq = dx*dx + dy*dy;
+    // Skip if too far in XY
+    if (dxy_sq > xy_search_radius * xy_search_radius) continue;
+    // Skip if node is above the query point (robot legs are above floor)
+    double node_z = kv.second.center.z();
+    if (node_z > p.z() + max_z_above_query) continue;
+    // Score: prefer low z (floor), with small XY penalty
+    double score = node_z + 0.1 * std::sqrt(dxy_sq);
+    if (score < best) { best = score; best_id = kv.first; }
+  }
+
+  // Fallback: if no candidate found, use original 3D distance
+  if (best_id.empty()) {
+    best = std::numeric_limits<double>::infinity();
+    for (const auto &kv : graph_nodes_) {
+      if (!kv.second.is_walkable) continue;
+      double dx = kv.second.center.x() - p.x();
+      double dy = kv.second.center.y() - p.y();
+      double dz = kv.second.center.z() - p.z();
+      double d = dx*dx + dy*dy + dz*dz;
+      if (d < best) { best = d; best_id = kv.first; }
+    }
   }
   return best_id;
 }
@@ -1401,12 +1386,37 @@ std::string AstarOctoPlanner::findClosestGraphNode(const octomap::point3d& p, co
   if (!graph || graph->nodes.empty()) return std::string();
   double best = std::numeric_limits<double>::infinity();
   std::string best_id;
+  // First pass: find candidates within XY radius, prefer lowest z (floor)
+  const double xy_search_radius = 1.0;  // 1m XY search radius
+  const double max_z_above_query = 0.3; // Only consider nodes up to 30cm above query point
+
   for (const auto &kv : graph->nodes) {
+    // Only consider walkable nodes for path planning
+    if (!kv.second.is_walkable) continue;
     double dx = kv.second.center.x() - p.x();
     double dy = kv.second.center.y() - p.y();
-    double dz = kv.second.center.z() - p.z();
-    double d = dx*dx + dy*dy + dz*dz;
-    if (d < best) { best = d; best_id = kv.first; }
+    double dxy_sq = dx*dx + dy*dy;
+    // Skip if too far in XY
+    if (dxy_sq > xy_search_radius * xy_search_radius) continue;
+    // Skip if node is above the query point (robot legs are above floor)
+    double node_z = kv.second.center.z();
+    if (node_z > p.z() + max_z_above_query) continue;
+    // Score: prefer low z (floor), with small XY penalty
+    double score = node_z + 0.1 * std::sqrt(dxy_sq);
+    if (score < best) { best = score; best_id = kv.first; }
+  }
+
+  // Fallback: if no candidate found, use original 3D distance
+  if (best_id.empty()) {
+    best = std::numeric_limits<double>::infinity();
+    for (const auto &kv : graph->nodes) {
+      if (!kv.second.is_walkable) continue;
+      double dx = kv.second.center.x() - p.x();
+      double dy = kv.second.center.y() - p.y();
+      double dz = kv.second.center.z() - p.z();
+      double d = dx*dx + dy*dy + dz*dz;
+      if (d < best) { best = d; best_id = kv.first; }
+    }
   }
   return best_id;
 }
@@ -1481,6 +1491,81 @@ std::array<double, 3> AstarOctoPlanner::gridToWorld(const std::tuple<int, int, i
 // referenced by the graph-based planner implementation: worldToGrid,
 // isWithinBounds, and isOccupied. Their declarations were removed from the
 // public header to avoid exposing unused private helpers.
+
+// Check horizontal floor support: sample a ring of directions at robot_radius_ distance
+// and verify enough directions have an occupied neighbor at similar Z. This detects thin
+// vertical structures (wall tops) that pass the vertical clearance check but are too
+// narrow for the robot to stand on.
+bool AstarOctoPlanner::hasFloorSupport(double x, double y, double z, double node_size) const
+{
+  if (!octree_) return false;
+
+  const double search_radius = std::max(robot_radius_, node_size * 2.0);
+  const double z_tol = std::max(active_voxel_size_ * 2.0, 0.15); // Allow Z variation for sloped surfaces / ramps
+  const double step_z = std::max(active_voxel_size_, 0.05);
+  const int num_dirs = std::max(4, floor_support_num_dirs_);
+  int support_count = 0;
+
+  for (int d = 0; d < num_dirs; ++d) {
+    double angle = d * (2.0 * M_PI / num_dirs);
+    double dx = search_radius * std::cos(angle);
+    double dy = search_radius * std::sin(angle);
+
+    // Check at the same Z and slightly above/below (handles ramps and uneven surfaces)
+    bool found = false;
+    for (double dz = -z_tol; dz <= z_tol; dz += step_z) {
+      octomap::OcTreeNode* nn = octree_->search(x + dx, y + dy, z + dz);
+      if (nn && octree_->isNodeOccupied(nn)) {
+        found = true;
+        break;
+      }
+    }
+    if (found) ++support_count;
+  }
+
+  double ratio = static_cast<double>(support_count) / static_cast<double>(num_dirs);
+  return ratio >= min_floor_support_ratio_;
+}
+
+// Edge collision check: sample points along the line from->to and at each sample
+// check multiple Z heights (from above surface up to robot_height_) for occupied voxels.
+// This prevents A* from connecting two walkable floor nodes across a wall.
+bool AstarOctoPlanner::isEdgeCollisionFree(const octomap::point3d& from, const octomap::point3d& to) const
+{
+  if (!octree_) return true;
+
+  double dist = from.distance(to);
+  if (dist < 1e-6) return true;
+
+  // Step along the edge roughly every half-voxel
+  double step = std::max(active_voxel_size_ * 0.5, 0.05);
+  int n_samples = std::max(2, static_cast<int>(std::ceil(dist / step)));
+
+  // We check the free space ABOVE the surface where the robot body would be.
+  // Surface nodes are occupied voxels, so start from above the voxel top.
+  const double voxel_half = active_voxel_size_ * 0.5;
+  const double z_start_offset = voxel_half + 0.05;  // just above voxel top surface
+  const double z_step = std::max(active_voxel_size_, 0.1);
+  const int n_z = std::max(2, static_cast<int>(std::ceil(robot_height_ / z_step)));
+
+  for (int i = 1; i < n_samples; ++i) {  // skip endpoints (they're already validated as walkable)
+    double t = static_cast<double>(i) / static_cast<double>(n_samples);
+    double sx = from.x() + t * (to.x() - from.x());
+    double sy = from.y() + t * (to.y() - from.y());
+    double sz = from.z() + t * (to.z() - from.z());
+
+    // Check from above surface voxel top up to robot_height_
+    for (int iz = 0; iz <= n_z; ++iz) {
+      double frac = static_cast<double>(iz) / static_cast<double>(n_z);
+      double check_z = sz + z_start_offset + frac * robot_height_;
+      octomap::OcTreeNode* nn = octree_->search(sx, sy, check_z);
+      if (nn && octree_->isNodeOccupied(nn)) {
+        return false;  // Wall or obstacle in the way
+      }
+    }
+  }
+  return true;
+}
 
 // Very simple cylinder collision check: sample a few radial directions at the given radius
 // and ensure no occupied node is found at those sample points (at the same z).
@@ -1575,6 +1660,7 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
   }
 
   path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("~/path", rclcpp::QoS(1).transient_local());
+  body_height_path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("~/body_height/path", rclcpp::QoS(1).transient_local());
   // Subscribe to octomap binary topic (primary map source)
 
   // Declare and use a configurable octomap topic name (allows changing topic at runtime)
@@ -1605,6 +1691,9 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
   footprint_samples_y_ = node_->declare_parameter(name_ + ".footprint_samples_y", footprint_samples_y_);
   max_surface_distance_ = node_->declare_parameter(name_ + ".max_surface_distance", max_surface_distance_);
   max_step_height_ = node_->declare_parameter(name_ + ".max_step_height", max_step_height_);
+  // Floor support parameters (horizontal extent check for wall rejection)
+  min_floor_support_ratio_ = node_->declare_parameter(name_ + ".min_floor_support_ratio", min_floor_support_ratio_);
+  floor_support_num_dirs_ = node_->declare_parameter(name_ + ".floor_support_num_dirs", floor_support_num_dirs_);
   enable_stair_edges_ = node_->declare_parameter(name_ + ".enable_stair_edges", enable_stair_edges_);
   stair_xy_radius_ = node_->declare_parameter(name_ + ".stair_xy_radius", stair_xy_radius_);
   stair_vertical_margin_ = node_->declare_parameter(name_ + ".stair_vertical_margin", stair_vertical_margin_);
@@ -1649,7 +1738,7 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
       // Avoid concurrent builds
       bool expected = false;
       if (!graph_building_.compare_exchange_strong(expected, true)) {
-        RCLCPP_DEBUG(node_->get_logger(), "Background graph build already in progress, skipping.");
+        //RCLCPP_DEBUG(node_->get_logger(), "Background graph build already in progress, skipping.");
         return;
       }
 
@@ -1669,23 +1758,24 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
         // Start from a copy of the current graph for incremental update
         new_graph->nodes = current_graph->nodes;
         new_graph->adj = current_graph->adj;
+        // Carry forward cached penalties so makePlan doesn't recompute them
         new_graph->node_penalty = current_graph->node_penalty;
         new_graph->penalized_nodes = current_graph->penalized_nodes;
         new_graph->processed_occupied_keys = current_graph->processed_occupied_keys;
         new_graph->nodes_needing_adjacency_update = current_graph->nodes_needing_adjacency_update;
 
-        RCLCPP_INFO(node_->get_logger(), "Background: incrementally updating connectivity graph...");
+        //RCLCPP_INFO(node_->get_logger(), "Background: incrementally updating connectivity graph...");
         updateConnectivityGraphIncrementalInto(new_graph);
-        RCLCPP_INFO(node_->get_logger(), "Background: connectivity graph updated. Nodes=%zu", new_graph->size());
+        //RCLCPP_INFO(node_->get_logger(), "Background: connectivity graph updated. Nodes=%zu", new_graph->size());
 
-        // Mark penalties as dirty - they'll be computed on next plan request
-        penalties_dirty_ = true;
+        // Incremental update: keep existing penalties, only mark dirty for new nodes
+        // Penalties will be computed on-demand only if params changed (not every update)
+        // penalties_dirty_ is NOT set here — existing penalties remain valid
       } else {
-        RCLCPP_INFO(node_->get_logger(), "Background: rebuilding connectivity graph from scratch...");
+        //RCLCPP_INFO(node_->get_logger(), "Background: rebuilding connectivity graph from scratch...");
         buildConnectivityGraphInto(new_graph);
-        RCLCPP_INFO(node_->get_logger(), "Background: connectivity graph ready. Nodes=%zu", new_graph->size());
-        // Full rebuild computes penalties, so they're valid
-        penalties_dirty_ = false;
+        //RCLCPP_INFO(node_->get_logger(), "Background: connectivity graph ready. Nodes=%zu", new_graph->size());
+        // Penalties are computed on-demand in makePlan, not during build
       }
 
       // Atomic swap: only hold mutex briefly to swap the pointer
@@ -1695,23 +1785,21 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
         // Also update legacy members for marker publishing until fully migrated
         graph_nodes_ = new_graph->nodes;
         graph_adj_ = new_graph->adj;
-        graph_node_penalty_ = new_graph->node_penalty;
-        graph_penalized_nodes_ = new_graph->penalized_nodes;
+        // Don't overwrite legacy penalty members — penalties live in active_graph_
+        // and are computed on-demand in makePlan
         processed_occupied_keys_ = new_graph->processed_occupied_keys;
         nodes_needing_adjacency_update_ = new_graph->nodes_needing_adjacency_update;
         graph_dirty_ = false;
       }
 
-      // Only publish markers after a FULL rebuild (which computes penalties).
-      // For incremental updates, skip marker publishing here - they'll be
-      // published when planning happens and penalties are computed on-demand.
-      // Otherwise, we'd overwrite the correct penalty markers with empty ones.
-      if (publish_graph_markers_ && !penalties_dirty_) {
+      // Publish graph structure markers (green/red walkable nodes).
+      // Penalty markers are published on-demand when a plan is requested.
+      if (publish_graph_markers_) {
         publishGraphMarkers(new_graph);
       }
 
       graph_building_ = false;
-      RCLCPP_INFO(node_->get_logger(), "Background: graph swap complete, planning can use new graph immediately.");
+      //RCLCPP_INFO(node_->get_logger(), "Background: graph swap complete, planning can use new graph immediately.");
     }
   );
 
@@ -1845,7 +1933,8 @@ void AstarOctoPlanner::octomapCallback(const octomap_msgs::msg::Octomap::SharedP
         // This is a new voxel we haven't processed before
         ++new_voxels;
         // Mark the corresponding graph node (to be created) as needing adjacency update
-        double node_z = cz + 0.5 * octree_->getNodeSize(it.getDepth()) + std::max(active_voxel_size_, 0.01);
+        // Use actual voxel center (no z-shift)
+        double node_z = cz;
         int node_ix_mm = static_cast<int>(std::round(cx * 1000.0));
         int node_iy_mm = static_cast<int>(std::round(cy * 1000.0));
         int node_iz_mm = static_cast<int>(std::round(node_z * 1000.0));

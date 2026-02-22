@@ -165,6 +165,8 @@ private:
   std::atomic_bool cancel_planning_;
   // publisher of resulting path
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+  // publisher of z-lifted path for visualization (not occluded by voxels)
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr body_height_path_pub_;
   // tf frame of the map
   std::string map_frame_;
   // handle of callback for changing parameters dynamically
@@ -188,6 +190,14 @@ private:
   std::array<double, 3> gridToWorld(const std::tuple<int, int, int>& grid_pt);
   // (removed) hasNoOccupiedCellsAbove: legacy vertical-check helper not used in current planner
   bool isCylinderCollisionFree(const std::tuple<int, int, int>& coord, double radius);
+
+  // Check that an occupied voxel has enough horizontal floor support at similar Z
+  // to be a genuine floor/ramp surface (rejects thin wall tops).
+  bool hasFloorSupport(double x, double y, double z, double node_size) const;
+
+  // Check that a straight-line edge between two 3D points is collision-free
+  // at robot body heights (samples multiple Z slices between ground and robot_height_).
+  bool isEdgeCollisionFree(const octomap::point3d& from, const octomap::point3d& to) const;
 
   // Temporarily clear occupied voxels within a vertical cylinder around a point
   // center: world coordinates of cylinder center
@@ -238,6 +248,10 @@ private:
   int footprint_samples_y_ = 3;
   double min_vertical_clearance_ = -0.5;
   double max_vertical_clearance_ = 0.6;
+  // Floor support: minimum fraction of ring directions that must have occupied
+  // neighbors at similar Z for a node to be considered walkable (rejects wall tops)
+  double min_floor_support_ratio_ = 0.4;
+  int floor_support_num_dirs_ = 8;  // number of directions to sample in the ring
   // Max vertical distance from a surface (occupied cell) a free node may be to be included
   double max_surface_distance_ = 0.25;
   // Maximum step/climb height (meters) allowed between node and surface for acceptance
@@ -254,7 +268,7 @@ private:
 
   // Corner/edge penalty tuning (defaults increased to keep robot away from walls)
   double corner_radius_ = 0.20;           // meters
-  double corner_penalty_weight_ = 3.0;    // multiplier for penalty
+  double corner_penalty_weight_ = 5.0;    // multiplier for penalty
   // RANSAC-based wall/corner detection
   double ransac_radius_ = 2.0;           // meters, neighborhood search radius
   double ransac_dist_thresh_ = 0.1;      // meters, inlier distance threshold
@@ -293,6 +307,7 @@ private:
     unsigned int depth = 0;
     octomap::point3d center;
     double size = 0.0;
+    bool is_walkable = true;  // true = floor surface with clearance, false = wall/obstacle
     std::string id() const {
       char buf[128];
       std::snprintf(buf, sizeof(buf), "%u_%u_%u_%u", key.k[0], key.k[1], key.k[2], depth);
