@@ -67,7 +67,7 @@ def generate_launch_description():
         [
             #map_odom,
             stamped_conversion,
-            pcl_mapfilter,
+            #pcl_mapfilter,
             move_base_flex,
             delayed_exe_path,
             #posture_mgr,
