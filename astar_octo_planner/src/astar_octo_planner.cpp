@@ -292,10 +292,12 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           }
         }
 
-        const double norm_factor = search_radius * 0.5;
+        const double norm_factor = search_radius * 0.75;  // higher → less CS penalty on interior floor
 
         // ---------- PART 2: Compute both penalties per node ----------
         size_t graph_border_count = 0;
+        std::vector<double> cs_penalties(walkable_list.size(), 0.0);
+        std::vector<double> gb_penalties(walkable_list.size(), 0.0);
 
         for (size_t wi = 0; wi < walkable_list.size(); ++wi) {
           const auto &w = walkable_list[wi];
@@ -389,12 +391,74 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
             }
           }
 
-          // Final penalty: max of both detectors
-          double penalty = std::max(cs_penalty, gb_penalty);
+          cs_penalties[wi] = cs_penalty;
+          gb_penalties[wi] = gb_penalty;
+        }
 
-          planning_graph->node_penalty[w.id] = penalty;
+        // ---------- PART 3: Spread graph-border penalty through graph edges ----------
+        // Multi-source Dijkstra from border nodes; penalty decays linearly
+        // with graph-distance so ramp edges get a smooth cost gradient.
+        const double spread_radius = penalty_spread_radius_;   // 0.60m
+        const double spread_decay  = penalty_spread_factor_;   // 0.25
+        std::vector<double> spread_gb(walkable_list.size(), 0.0);
+        {
+          struct SpreadEntry {
+            double dist;
+            size_t wi;
+            double source_gb;
+          };
+          auto cmp = [](const SpreadEntry &a, const SpreadEntry &b) {
+            return a.dist > b.dist;
+          };
+          std::priority_queue<SpreadEntry, std::vector<SpreadEntry>, decltype(cmp)> pq(cmp);
+          std::vector<double> best_dist(walkable_list.size(), std::numeric_limits<double>::max());
+
+          // Seed: every graph-border node
+          for (size_t wi = 0; wi < walkable_list.size(); ++wi) {
+            if (gb_penalties[wi] > 1e-9) {
+              spread_gb[wi] = gb_penalties[wi];  // keep full penalty at source
+              best_dist[wi] = 0.0;
+              pq.push({0.0, wi, gb_penalties[wi]});
+            }
+          }
+
+          while (!pq.empty()) {
+            auto top = pq.top();
+            pq.pop();
+            if (top.dist > best_dist[top.wi] + 1e-9) continue;
+
+            auto adj_it = planning_graph->adj.find(walkable_list[top.wi].id);
+            if (adj_it == planning_graph->adj.end()) continue;
+
+            for (const auto &nb_id : adj_it->second) {
+              auto idx_it = id_to_idx.find(nb_id);
+              if (idx_it == id_to_idx.end()) continue;
+              size_t nb_wi = idx_it->second;
+
+              double edge_len = walkable_list[top.wi].center.distance(
+                  walkable_list[nb_wi].center);
+              double new_dist = top.dist + edge_len;
+              if (new_dist >= spread_radius) continue;
+
+              // Linear decay
+              double decay = 1.0 - (new_dist / spread_radius);
+              double new_val = top.source_gb * decay * spread_decay;
+
+              if (new_val > spread_gb[nb_wi] + 1e-9) {
+                spread_gb[nb_wi] = new_val;
+                best_dist[nb_wi] = new_dist;
+                pq.push({new_dist, nb_wi, top.source_gb});
+              }
+            }
+          }
+        }
+
+        // ---------- PART 4: Final penalty = max(cs, gb, spread_gb) ----------
+        for (size_t wi = 0; wi < walkable_list.size(); ++wi) {
+          double penalty = std::max({cs_penalties[wi], gb_penalties[wi], spread_gb[wi]});
+          planning_graph->node_penalty[walkable_list[wi].id] = penalty;
           if (penalty > 1e-9) {
-            planning_graph->penalized_nodes.insert(w.id);
+            planning_graph->penalized_nodes.insert(walkable_list[wi].id);
             ++penalized_count;
           }
         }
