@@ -175,33 +175,15 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
     }
 
     // --- On-demand penalty/costmap computation ---
-    // Two modes:
-    //  1) penalties_dirty_ = true  -> full recompute (param change)
-    //  2) penalties_dirty_ = false -> incremental: only compute for nodes not yet in node_penalty
+    // Always recompute all penalties from scratch so every node in the graph
+    // is guaranteed to have a penalty value in the costmap.
     if (planning_graph && !planning_graph->nodes.empty()) {
-      // Collect nodes that don't have a penalty yet (new nodes from incremental builds)
-      std::vector<std::pair<std::string, GraphNode>> nodes_needing_penalty;
-      if (penalties_dirty_) {
-        // Full recompute: all nodes
-        nodes_needing_penalty.reserve(planning_graph->nodes.size());
-        for (const auto &kv : planning_graph->nodes) {
-          nodes_needing_penalty.emplace_back(kv.first, kv.second);
-        }
-        planning_graph->node_penalty.clear();
-        planning_graph->penalized_nodes.clear();
-      } else {
-        // Incremental: only nodes missing from penalty map
-        for (const auto &kv : planning_graph->nodes) {
-          if (planning_graph->node_penalty.find(kv.first) == planning_graph->node_penalty.end()) {
-            nodes_needing_penalty.emplace_back(kv.first, kv.second);
-          }
-        }
-      }
+      planning_graph->node_penalty.clear();
+      planning_graph->penalized_nodes.clear();
 
-      if (!nodes_needing_penalty.empty()) {
-        RCLCPP_INFO(node_->get_logger(), "Computing penalties for %zu nodes (%s)...",
-                    nodes_needing_penalty.size(),
-                    penalties_dirty_ ? "full recompute" : "incremental append");
+      {
+        RCLCPP_INFO(node_->get_logger(), "Computing penalties for %zu nodes (full recompute)...",
+                    planning_graph->nodes.size());
         auto t_pen_start = std::chrono::steady_clock::now();
 
         // ================================================================
@@ -480,7 +462,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
         if (publish_graph_markers_ && graph_marker_pub_) {
           publishGraphMarkers(planning_graph);
         }
-      }
+      }  // end penalty computation block
 
       penalties_dirty_ = false;
     }
@@ -1768,16 +1750,19 @@ void AstarOctoPlanner::publishGraphMarkers(const std::shared_ptr<GraphData>& gra
   pen_m.scale.y = static_cast<float>(scale);
   pen_m.scale.z = static_cast<float>(scale);
 
-  for (const auto &kv : graph->node_penalty) {
-    double pen = kv.second;
-    if (pen <= 1e-6) continue;
-    auto itn = graph->nodes.find(kv.first);
-    if (itn == graph->nodes.end()) continue;
+  // Show ALL walkable nodes with green→red gradient based on penalty.
+  // Zero-penalty nodes are rendered as green so there are no holes.
+  for (const auto &kv : graph->nodes) {
+    if (!kv.second.is_walkable) continue;
     geometry_msgs::msg::Point p;
-    p.x = itn->second.center.x();
-    p.y = itn->second.center.y();
-    p.z = itn->second.center.z();
+    p.x = kv.second.center.x();
+    p.y = kv.second.center.y();
+    p.z = kv.second.center.z();
     pen_m.points.push_back(p);
+    // Look up penalty (0 if not in map)
+    double pen = 0.0;
+    auto pit = graph->node_penalty.find(kv.first);
+    if (pit != graph->node_penalty.end()) pen = pit->second;
     // color ramp: low green -> high red (normalized to wall_penalty_weight_)
     std_msgs::msg::ColorRGBA c;
     double v = std::min(1.0, pen / std::max(1e-6, wall_penalty_weight_));
