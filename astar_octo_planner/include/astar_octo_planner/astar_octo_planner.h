@@ -359,7 +359,7 @@ private:
   bool incremental_graph_build_ = true;
 
   // Octomap topic name (configurable)
-  std::string octomap_topic_ = std::string("/navigation/octomap_full");
+  std::string octomap_topic_ = std::string("/navigation/octomap_binary");
 
   // Legacy incremental tracking members (now inside GraphData, kept for transition)
   std::unordered_set<std::string> processed_occupied_keys_;

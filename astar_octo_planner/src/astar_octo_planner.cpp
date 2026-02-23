@@ -204,76 +204,197 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
                     penalties_dirty_ ? "full recompute" : "incremental append");
         auto t_pen_start = std::chrono::steady_clock::now();
 
-        // Build full node snapshot for neighbor lookups (need all nodes as context)
-        std::vector<std::pair<std::string, GraphNode>> node_snapshot;
-        node_snapshot.reserve(planning_graph->nodes.size());
+        // ================================================================
+        // Centroid-shift edge detection (based on Ahmed et al.)
+        //
+        // For each walkable node, find its k-nearest WALKABLE neighbors
+        // within a search radius (penalty_spread_radius_). Compute the
+        // centroid of those neighbors. If the centroid is far from the
+        // query point → the node is at an edge (wall-floor intersection)
+        // because neighbors are asymmetric (only on the floor side).
+        //
+        // Interior floor nodes have symmetric neighbors → centroid ≈
+        // query point → shift ≈ 0 → zero penalty (green).
+        //
+        // The shift magnitude directly gives a smooth gradient from
+        // walls (high) to center (zero). No explicit "spread" needed.
+        //
+        // Corner detection: PCA on the shift direction. If neighbors
+        // form a narrow angular cone → single wall. If they spread
+        // wide → corner (two walls meeting).
+        // ================================================================
+
+        // Spatial hash of walkable nodes for fast XY neighbor lookup
+        const double cell_size = active_voxel_size_ * 2.0;
+        struct GridKey { int gx, gy; bool operator==(const GridKey &o) const { return gx==o.gx && gy==o.gy; } };
+        struct GridHash { size_t operator()(const GridKey &k) const { return std::hash<int>()(k.gx) ^ (std::hash<int>()(k.gy) << 16); } };
+        std::unordered_map<GridKey, std::vector<size_t>, GridHash> walkable_grid;
+
+        struct WalkableEntry { std::string id; octomap::point3d center; double z; };
+        std::vector<WalkableEntry> walkable_list;
+        walkable_list.reserve(planning_graph->nodes.size());
         for (const auto &kv : planning_graph->nodes) {
-          node_snapshot.emplace_back(kv.first, kv.second);
+          if (!kv.second.is_walkable) continue;
+          size_t idx = walkable_list.size();
+          walkable_list.push_back({kv.first, kv.second.center, static_cast<double>(kv.second.center.z())});
+          int gx = static_cast<int>(std::floor(kv.second.center.x() / cell_size));
+          int gy = static_cast<int>(std::floor(kv.second.center.y() / cell_size));
+          walkable_grid[{gx, gy}].push_back(idx);
         }
 
-        for (size_t idx = 0; idx < nodes_needing_penalty.size(); ++idx) {
-          const auto& [node_id, node] = nodes_needing_penalty[idx];
+        // Search radius for neighbor collection (use penalty_spread_radius_
+        // from UI, default 0.6m). This controls how far the penalty gradient
+        // extends from walls into the floor interior.
+        const double search_radius = std::max(penalty_spread_radius_, active_voxel_size_ * 3.0);
+        const double z_tol = active_voxel_size_ * 1.0; // same level only
+        const int search_cells = static_cast<int>(std::ceil(search_radius / cell_size)) + 1;
+
+        // λ threshold from paper — scale-invariant classification.
+        // Higher λ → fewer edges detected. We use it to normalize the
+        // shift into a 0..1 range. shift / (search_radius) gives ratio.
+        // Points right at the wall edge have shift ≈ search_radius/2.
+
+        size_t penalized_count = 0;
+        size_t edge_count = 0;
+        double max_shift_seen = 0.0;
+
+        // First pass: compute raw centroid shift for each walkable node
+        struct ShiftInfo { double shift_xy = 0.0; double shift_x = 0.0; double shift_y = 0.0; int n_neighbors = 0; };
+        std::vector<ShiftInfo> shift_data(walkable_list.size());
+
+        for (size_t wi = 0; wi < walkable_list.size(); ++wi) {
+          const auto &w = walkable_list[wi];
+          int gx = static_cast<int>(std::floor(w.center.x() / cell_size));
+          int gy = static_cast<int>(std::floor(w.center.y() / cell_size));
+
+          double sum_x = 0.0, sum_y = 0.0;
+          int count = 0;
+
+          for (int dgx = -search_cells; dgx <= search_cells; ++dgx) {
+            for (int dgy = -search_cells; dgy <= search_cells; ++dgy) {
+              auto it = walkable_grid.find({gx+dgx, gy+dgy});
+              if (it == walkable_grid.end()) continue;
+              for (size_t nidx : it->second) {
+                if (nidx == wi) continue; // skip self
+                const auto &nb = walkable_list[nidx];
+                if (std::abs(nb.z - w.z) > z_tol) continue; // same level
+                double dx = nb.center.x() - w.center.x();
+                double dy = nb.center.y() - w.center.y();
+                double dist = std::sqrt(dx*dx + dy*dy);
+                if (dist <= search_radius) {
+                  sum_x += nb.center.x();
+                  sum_y += nb.center.y();
+                  ++count;
+                }
+              }
+            }
+          }
+
+          if (count >= 2) {
+            double cx = sum_x / count;
+            double cy = sum_y / count;
+            double sx = cx - w.center.x();
+            double sy = cy - w.center.y();
+            double shift = std::sqrt(sx*sx + sy*sy);
+            shift_data[wi] = {shift, sx, sy, count};
+            max_shift_seen = std::max(max_shift_seen, shift);
+          }
+        }
+
+        RCLCPP_INFO(node_->get_logger(),
+                    "Centroid-shift: max_shift=%.4f m, search_radius=%.2f m, walkable=%zu",
+                    max_shift_seen, search_radius, walkable_list.size());
+
+        // Second pass: convert shifts to penalties
+        // Normalize by search_radius/2 (theoretical max shift for a node
+        // at the very edge of a straight wall = ~half the search radius).
+        const double norm_factor = search_radius * 0.5;
+
+        for (size_t wi = 0; wi < walkable_list.size(); ++wi) {
+          const auto &w = walkable_list[wi];
+          const auto &si = shift_data[wi];
           double penalty = 0.0;
 
-          // Centroid-shift detector (k-nearest variant)
-          std::vector<octomap::point3d> nbrs;
-          nbrs.reserve(32);
-          for (const auto &[other_id, other_node] : node_snapshot) {
-            if (other_id == node_id) continue;
-            double dx = other_node.center.x() - node.center.x();
-            double dy = other_node.center.y() - node.center.y();
-            double dxy = std::sqrt(dx*dx + dy*dy);
-            if (dxy <= ransac_radius_) nbrs.push_back(other_node.center);
-          }
+          if (si.n_neighbors >= 2 && si.shift_xy > 1e-6) {
+            // Ratio of shift to normalization factor: 0 (symmetric) to 1+ (edge)
+            double ratio = si.shift_xy / norm_factor;
+            ratio = std::min(ratio, 1.0); // cap at 1.0
 
-          if (nbrs.size() >= 4) {
-            std::sort(nbrs.begin(), nbrs.end(), [&](const octomap::point3d &a, const octomap::point3d &b){
-              double da = std::hypot(a.x()-node.center.x(), a.y()-node.center.y());
-              double db = std::hypot(b.x()-node.center.x(), b.y()-node.center.y());
-              return da < db;
-            });
-            size_t k_use = std::min(static_cast<size_t>(centroid_k_), nbrs.size());
-            double cx=0, cy=0, cz=0;
-            for (size_t ii=0; ii<k_use; ++ii) { cx += nbrs[ii].x(); cy += nbrs[ii].y(); cz += nbrs[ii].z(); }
-            cx /= static_cast<double>(k_use); cy /= static_cast<double>(k_use); cz /= static_cast<double>(k_use);
-            double shift = std::sqrt((cx - node.center.x())*(cx - node.center.x()) +
-                                     (cy - node.center.y())*(cy - node.center.y()) +
-                                     (cz - node.center.z())*(cz - node.center.z()));
-            double Zi = 1e9;
-            for (size_t ii=0; ii<k_use; ++ii) {
-              double dd = std::sqrt((nbrs[ii].x()-node.center.x())*(nbrs[ii].x()-node.center.x()) +
-                                    (nbrs[ii].y()-node.center.y())*(nbrs[ii].y()-node.center.y()) +
-                                    (nbrs[ii].z()-node.center.z())*(nbrs[ii].z()-node.center.z()));
-              Zi = std::min(Zi, dd);
-            }
-            if (Zi < 1e-6) Zi = node.size;
+            // Apply wall_penalty_weight_ scaled by ratio²
+            // Quadratic makes interior fall off faster → green center
+            penalty = wall_penalty_weight_ * ratio * ratio;
 
-            if (shift > centroid_lambda_ * Zi) {
-              penalty += std::max(0.0, corner_penalty_weight_);
-            } else {
-              // Check bounding box spread
-              double minx=1e9,maxx=-1e9,miny=1e9,maxy=-1e9,minz=1e9,maxz=-1e9;
-              for (size_t ii=0; ii<k_use; ++ii) {
-                double vx = nbrs[ii].x(); double vy = nbrs[ii].y(); double vz = nbrs[ii].z();
-                if (vx < minx) minx = vx; if (vx > maxx) maxx = vx;
-                if (vy < miny) miny = vy; if (vy > maxy) maxy = vy;
-                if (vz < minz) minz = vz; if (vz > maxz) maxz = vz;
+            if (ratio > 0.3) ++edge_count;
+
+            // Corner detection: for edge nodes, check if neighbors
+            // are clustered in a narrow cone (single wall) or spread
+            // wide (corner = two walls meeting). Use variance of
+            // neighbor angles relative to shift direction.
+            if (ratio > 0.2 && si.n_neighbors >= 4) {
+              // Compute angular spread of neighbors
+              int gx = static_cast<int>(std::floor(w.center.x() / cell_size));
+              int gy = static_cast<int>(std::floor(w.center.y() / cell_size));
+              double shift_angle = std::atan2(si.shift_y, si.shift_x);
+
+              // Count how many angular quadrants (relative to shift dir) have neighbors
+              int quadrant_mask = 0;
+              for (int dgx = -search_cells; dgx <= search_cells; ++dgx) {
+                for (int dgy = -search_cells; dgy <= search_cells; ++dgy) {
+                  auto it = walkable_grid.find({gx+dgx, gy+dgy});
+                  if (it == walkable_grid.end()) continue;
+                  for (size_t nidx : it->second) {
+                    if (nidx == wi) continue;
+                    const auto &nb = walkable_list[nidx];
+                    if (std::abs(nb.z - w.z) > z_tol) continue;
+                    double dx = nb.center.x() - w.center.x();
+                    double dy = nb.center.y() - w.center.y();
+                    double dist = std::sqrt(dx*dx + dy*dy);
+                    if (dist > search_radius) continue;
+                    double angle = std::atan2(dy, dx) - shift_angle;
+                    // Normalize to [-π, π]
+                    while (angle > M_PI) angle -= 2.0 * M_PI;
+                    while (angle < -M_PI) angle += 2.0 * M_PI;
+                    // Map to quadrant 0-3
+                    int q;
+                    if (angle >= -M_PI/4 && angle < M_PI/4) q = 0;
+                    else if (angle >= M_PI/4 && angle < 3*M_PI/4) q = 1;
+                    else if (angle >= -3*M_PI/4 && angle < -M_PI/4) q = 3;
+                    else q = 2;
+                    quadrant_mask |= (1 << q);
+                  }
+                }
               }
-              int axes = 0; double rho = 0.05;
-              if ((maxx - minx) > rho) ++axes; if ((maxy - miny) > rho) ++axes; if ((maxz - minz) > rho) ++axes;
-              if (axes >= 2) { penalty += 0.5 * centroid_penalty_weight_; }
+
+              int n_quadrants = __builtin_popcount(quadrant_mask);
+              // Single wall: neighbors in ~2 quadrants (opposite to wall)
+              // Corner: neighbors in only 1 quadrant (pushed into corner)
+              // If neighbors only fill 1-2 quadrants → strong corner
+              if (n_quadrants <= 2 && ratio > 0.4) {
+                double corner_factor = (3.0 - n_quadrants) / 2.0; // 1q→1.0, 2q→0.5
+                penalty += corner_penalty_weight_ * ratio * corner_factor;
+              }
             }
           }
 
-          planning_graph->node_penalty[node_id] = penalty;
+          planning_graph->node_penalty[w.id] = penalty;
           if (penalty > 1e-9) {
-            planning_graph->penalized_nodes.insert(node_id);
+            planning_graph->penalized_nodes.insert(w.id);
+            ++penalized_count;
+          }
+        }
+
+        // Non-walkable nodes: zero penalty
+        for (const auto &kv : planning_graph->nodes) {
+          if (!kv.second.is_walkable) {
+            planning_graph->node_penalty[kv.first] = 0.0;
           }
         }
 
         auto t_pen_end = std::chrono::steady_clock::now();
         double dur_pen = std::chrono::duration_cast<std::chrono::duration<double>>(t_pen_end - t_pen_start).count();
-        RCLCPP_INFO(node_->get_logger(), "Penalty computation took %.3f s for %zu nodes", dur_pen, nodes_needing_penalty.size());
+        RCLCPP_INFO(node_->get_logger(),
+                    "Penalty: %.3f s, walkable=%zu, edges(>0.3)=%zu, penalized=%zu (search_r=%.2fm, max_shift=%.4fm)",
+                    dur_pen, walkable_list.size(), edge_count, penalized_count, search_radius, max_shift_seen);
 
         // Publish penalty markers now that they're computed
         if (publish_graph_markers_ && graph_marker_pub_) {
@@ -506,7 +627,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
         // --- Connected-component diagnostic ---
         size_t start_component_size = expanded_set.size();
 
-        // BFS from goal (raw adjacency, no collision checks) to find its component
+        // BFS from goal (walkable nodes only) to find its component
         std::unordered_set<std::string> goal_component;
         {
           std::queue<std::string> bfs_q;
@@ -518,6 +639,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
             if (it_a == local_adj.end()) continue;
             for (const auto &v : it_a->second) {
               if (local_nodes.find(v) == local_nodes.end()) continue;
+              if (!local_nodes.at(v).is_walkable) continue; // Only walkable nodes
               if (goal_component.insert(v).second) bfs_q.push(v);
             }
           }
@@ -527,7 +649,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           "DISCONNECTED GRAPH DIAGNOSTIC:\n"
           "  Total graph nodes: %zu\n"
           "  Start component (A* reachable): %zu nodes\n"
-          "  Goal  component (raw adjacency): %zu nodes\n"
+          "  Goal  component (walkable BFS): %zu nodes\n"
           "  Goal in start component: %s",
           local_nodes.size(),
           start_component_size,
@@ -549,9 +671,262 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           }
         }
 
-        message = "No path found on graph";
+        // --- Bridge planning: find closest pair between components and stitch paths ---
+        // The A* start component uses isEdgeCollisionFree (strict), and the goal BFS uses
+        // walkable adjacency. Nodes between them may be in neither set. So we search ALL
+        // walkable nodes in the graph to find the closest pair that spans the gap.
+        //
+        // Strategy: Run a walkable-only BFS from start (ignoring isEdgeCollisionFree) to
+        // get the true start walkable component, then bridge from that to the goal component.
+        std::unordered_set<std::string> start_walkable_component;
+        {
+          std::queue<std::string> bfs_q;
+          bfs_q.push(start_id);
+          start_walkable_component.insert(start_id);
+          while (!bfs_q.empty()) {
+            std::string u = bfs_q.front(); bfs_q.pop();
+            auto it_a = local_adj.find(u);
+            if (it_a == local_adj.end()) continue;
+            for (const auto &v : it_a->second) {
+              if (local_nodes.find(v) == local_nodes.end()) continue;
+              if (!local_nodes.at(v).is_walkable) continue;
+              if (start_walkable_component.insert(v).second) bfs_q.push(v);
+            }
+          }
+        }
 
-        return mbf_msgs::action::GetPath::Result::NO_PATH_FOUND;
+        RCLCPP_INFO(node_->get_logger(),
+          "Bridge search: start walkable BFS=%zu nodes (A* expanded=%zu), goal walkable BFS=%zu nodes",
+          start_walkable_component.size(), expanded_set.size(), goal_component.size());
+
+        std::string bridge_start_id, bridge_goal_id;
+        double bridge_dist_sq = std::numeric_limits<double>::infinity();
+
+        // Collect walkable nodes EXCLUSIVE to each component for the bridge search
+        std::vector<std::pair<std::string, octomap::point3d>> start_walkable_pts;
+        std::vector<std::pair<std::string, octomap::point3d>> goal_walkable_pts;
+        for (const auto &nid : start_walkable_component) {
+          if (goal_component.count(nid)) continue;
+          auto it_n = local_nodes.find(nid);
+          if (it_n != local_nodes.end() && it_n->second.is_walkable) {
+            start_walkable_pts.emplace_back(nid, it_n->second.center);
+          }
+        }
+        for (const auto &nid : goal_component) {
+          if (start_walkable_component.count(nid)) continue;
+          auto it_n = local_nodes.find(nid);
+          if (it_n != local_nodes.end() && it_n->second.is_walkable) {
+            goal_walkable_pts.emplace_back(nid, it_n->second.center);
+          }
+        }
+
+        RCLCPP_INFO(node_->get_logger(),
+          "Bridge candidates: start_pts=%zu, goal_pts=%zu",
+          start_walkable_pts.size(), goal_walkable_pts.size());
+
+        // Find closest pair
+        for (const auto &[sid, spt] : start_walkable_pts) {
+          for (const auto &[gid, gpt] : goal_walkable_pts) {
+            double dx = spt.x() - gpt.x();
+            double dy = spt.y() - gpt.y();
+            double dz = spt.z() - gpt.z();
+            double d2 = dx*dx + dy*dy + dz*dz;
+            if (d2 < bridge_dist_sq) {
+              bridge_dist_sq = d2;
+              bridge_start_id = sid;
+              bridge_goal_id = gid;
+            }
+          }
+        }
+
+        double bridge_dist = std::sqrt(bridge_dist_sq);
+        const double max_bridge_dist = 0.3; // Only bridge small gaps (up to 30 cm)
+
+        if (!bridge_start_id.empty() && !bridge_goal_id.empty() && bridge_dist <= max_bridge_dist) {
+          RCLCPP_WARN(node_->get_logger(),
+            "BRIDGE PLANNING: bridging %.3f m gap between %s and %s",
+            bridge_dist, bridge_start_id.c_str(), bridge_goal_id.c_str());
+
+          // Run A* within start walkable component: start → bridge_start
+          // (using walkable adjacency, no isEdgeCollisionFree, to avoid the disconnect)
+          std::vector<std::string> path_to_bridge;
+          {
+            std::unordered_map<std::string, double> gs1;
+            std::unordered_map<std::string, std::string> cf1;
+            std::priority_queue<PQItem, std::vector<PQItem>, PQCmp> oq1;
+
+            auto h_bridge_start = [&](const std::string &a) -> double {
+              auto it = local_nodes.find(a);
+              auto it2 = local_nodes.find(bridge_start_id);
+              if (it == local_nodes.end() || it2 == local_nodes.end()) return 0.0;
+              return it->second.center.distance(it2->second.center);
+            };
+
+            oq1.push({start_id, h_bridge_start(start_id), 0.0});
+            gs1[start_id] = 0.0;
+
+            while (!oq1.empty()) {
+              PQItem cur = oq1.top(); oq1.pop();
+              if (cur.id == bridge_start_id) {
+                std::string u = bridge_start_id;
+                while (cf1.find(u) != cf1.end()) { path_to_bridge.push_back(u); u = cf1.at(u); }
+                path_to_bridge.push_back(start_id);
+                std::reverse(path_to_bridge.begin(), path_to_bridge.end());
+                break;
+              }
+              if (gs1.find(cur.id) != gs1.end() && cur.g > gs1.at(cur.id)) continue;
+              if (start_walkable_component.count(cur.id) == 0) continue;
+              auto it_a1 = local_adj.find(cur.id);
+              if (it_a1 == local_adj.end()) continue;
+              for (const auto &nb : it_a1->second) {
+                if (local_nodes.find(nb) == local_nodes.end()) continue;
+                if (!local_nodes.at(nb).is_walkable) continue;
+                if (start_walkable_component.count(nb) == 0) continue;
+                double mc = local_nodes.at(cur.id).center.distance(local_nodes.at(nb).center);
+                double pen = getPrecomputedPenalty(nb);
+                double tent = cur.g + mc + pen;
+                if (gs1.find(nb) == gs1.end() || tent < gs1[nb]) {
+                  cf1[nb] = cur.id;
+                  gs1[nb] = tent;
+                  oq1.push({nb, tent + h_bridge_start(nb), tent});
+                }
+              }
+            }
+          }
+
+          // Run A* within goal component: bridge_goal → goal
+          // (using raw adjacency — no isEdgeCollisionFree — to avoid re-creating the disconnect)
+          std::vector<std::string> path_from_bridge;
+          {
+            std::unordered_map<std::string, double> gs2;
+            std::unordered_map<std::string, std::string> cf2;
+            std::priority_queue<PQItem, std::vector<PQItem>, PQCmp> oq2;
+
+            oq2.push({bridge_goal_id, heuristic_local(bridge_goal_id), 0.0});
+            gs2[bridge_goal_id] = 0.0;
+
+            while (!oq2.empty()) {
+              PQItem cur = oq2.top(); oq2.pop();
+              if (cur.id == goal_id) {
+                // Reconstruct
+                std::string u = goal_id;
+                while (cf2.find(u) != cf2.end()) { path_from_bridge.push_back(u); u = cf2.at(u); }
+                path_from_bridge.push_back(bridge_goal_id);
+                std::reverse(path_from_bridge.begin(), path_from_bridge.end());
+                break;
+              }
+              if (gs2.find(cur.id) != gs2.end() && cur.g > gs2.at(cur.id)) continue;
+              // Only expand within the goal component
+              if (goal_component.count(cur.id) == 0) continue;
+              auto it_a2 = local_adj.find(cur.id);
+              if (it_a2 == local_adj.end()) continue;
+              for (const auto &nb : it_a2->second) {
+                if (local_nodes.find(nb) == local_nodes.end()) continue;
+                if (!local_nodes.at(nb).is_walkable) continue;
+                if (goal_component.count(nb) == 0) continue;
+                double mc = local_nodes.at(cur.id).center.distance(local_nodes.at(nb).center);
+                double pen = getPrecomputedPenalty(nb);
+                double tent = cur.g + mc + pen;
+                if (gs2.find(nb) == gs2.end() || tent < gs2[nb]) {
+                  cf2[nb] = cur.id;
+                  gs2[nb] = tent;
+                  oq2.push({nb, tent + heuristic_local(nb), tent});
+                }
+              }
+            }
+          }
+
+          if (!path_to_bridge.empty() && !path_from_bridge.empty()) {
+            RCLCPP_INFO(node_->get_logger(),
+              "BRIDGE PATH: start→bridge=%zu nodes, bridge gap=%.3f m, bridge→goal=%zu nodes",
+              path_to_bridge.size(), bridge_dist, path_from_bridge.size());
+
+            // Stitch the full path: path_to_bridge + bridge_goal_path
+            path_ids.clear();
+            for (const auto &pid : path_to_bridge) path_ids.push_back(pid);
+            for (const auto &pid : path_from_bridge) path_ids.push_back(pid);
+
+            RCLCPP_INFO(node_->get_logger(), "Bridge path total: %zu waypoints", path_ids.size());
+          } else {
+            if (path_to_bridge.empty()) {
+              RCLCPP_WARN(node_->get_logger(),
+                "Bridge planning failed: no path from start to bridge_start within start component");
+            }
+            if (path_from_bridge.empty()) {
+              RCLCPP_WARN(node_->get_logger(),
+                "Bridge planning failed: no path from bridge_goal to goal within goal component");
+            }
+          }
+        } else if (!bridge_start_id.empty() && !bridge_goal_id.empty()) {
+          RCLCPP_WARN(node_->get_logger(),
+            "Bridge gap too large (%.3f m > %.3f m max) — not bridging", bridge_dist, max_bridge_dist);
+        } else {
+          RCLCPP_WARN(node_->get_logger(),
+            "Bridge planning skipped: no candidate pairs found (start_pts=%zu, goal_pts=%zu)",
+            start_walkable_pts.size(), goal_walkable_pts.size());
+        }
+
+        // If bridge planning succeeded, path_ids is non-empty and we fall through
+        // to the normal path conversion below. Otherwise try a relaxed A*.
+
+        // Relaxed A* fallback: if the start and goal are in the same walkable
+        // component (BFS-reachable without isEdgeCollisionFree), the disconnect
+        // is caused by overly-strict edge collision checks. Run A* using only
+        // walkable adjacency (no isEdgeCollisionFree) to find a path.
+        if (path_ids.empty() && start_walkable_component.count(goal_id) > 0) {
+          RCLCPP_WARN(node_->get_logger(),
+            "Components are identical (%zu walkable nodes). Running relaxed A* (no edge collision check)...",
+            start_walkable_component.size());
+
+          std::unordered_map<std::string, double> gs_relaxed;
+          std::unordered_map<std::string, std::string> cf_relaxed;
+          std::priority_queue<PQItem, std::vector<PQItem>, PQCmp> oq_relaxed;
+
+          oq_relaxed.push({start_id, heuristic_local(start_id), 0.0});
+          gs_relaxed[start_id] = 0.0;
+
+          while (!oq_relaxed.empty()) {
+            PQItem cur = oq_relaxed.top(); oq_relaxed.pop();
+            if (cur.id == goal_id) {
+              std::string u = goal_id;
+              while (cf_relaxed.find(u) != cf_relaxed.end()) {
+                path_ids.push_back(u); u = cf_relaxed.at(u);
+              }
+              path_ids.push_back(start_id);
+              std::reverse(path_ids.begin(), path_ids.end());
+              break;
+            }
+            if (gs_relaxed.find(cur.id) != gs_relaxed.end() && cur.g > gs_relaxed.at(cur.id)) continue;
+            auto it_a = local_adj.find(cur.id);
+            if (it_a == local_adj.end()) continue;
+            for (const auto &nb : it_a->second) {
+              if (local_nodes.find(nb) == local_nodes.end()) continue;
+              if (!local_nodes.at(nb).is_walkable) continue;
+              // NO isEdgeCollisionFree check — rely on walkable adjacency + penalties
+              double mc = local_nodes.at(cur.id).center.distance(local_nodes.at(nb).center);
+              double pen = getPrecomputedPenalty(nb);
+              double tent = cur.g + mc + pen;
+              if (gs_relaxed.find(nb) == gs_relaxed.end() || tent < gs_relaxed[nb]) {
+                cf_relaxed[nb] = cur.id;
+                gs_relaxed[nb] = tent;
+                oq_relaxed.push({nb, tent + heuristic_local(nb), tent});
+              }
+            }
+          }
+
+          if (!path_ids.empty()) {
+            RCLCPP_INFO(node_->get_logger(),
+              "Relaxed A* found path: %zu waypoints", path_ids.size());
+          } else {
+            RCLCPP_WARN(node_->get_logger(),
+              "Relaxed A* also failed to find path");
+          }
+        }
+
+        if (path_ids.empty()) {
+          message = "No path found on graph";
+          return mbf_msgs::action::GetPath::Result::NO_PATH_FOUND;
+        }
       }
 
       // Convert found path ids to PoseStamped
@@ -628,9 +1003,9 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           geometry_msgs::msg::Point p;
           p.x = itn->second.center.x(); p.y = itn->second.center.y(); p.z = itn->second.center.z();
           pen_m.points.push_back(p);
-          // color ramp: low green -> high red
+          // color ramp: low green -> high red (normalized to wall_penalty_weight_)
           std_msgs::msg::ColorRGBA c;
-          double v = std::min(1.0, pen / std::max(1e-6, corner_penalty_weight_));
+          double v = std::min(1.0, pen / std::max(1e-6, wall_penalty_weight_));
           c.r = static_cast<float>(v);
           c.g = static_cast<float>(1.0 - v);
           c.b = 0.0f;
@@ -1323,9 +1698,9 @@ void AstarOctoPlanner::publishGraphMarkers(const std::shared_ptr<GraphData>& gra
     p.y = itn->second.center.y();
     p.z = itn->second.center.z();
     pen_m.points.push_back(p);
-    // color ramp: low green -> high red
+    // color ramp: low green -> high red (normalized to wall_penalty_weight_)
     std_msgs::msg::ColorRGBA c;
-    double v = std::min(1.0, pen / std::max(1e-6, corner_penalty_weight_));
+    double v = std::min(1.0, pen / std::max(1e-6, wall_penalty_weight_));
     c.r = static_cast<float>(v);
     c.g = static_cast<float>(1.0 - v);
     c.b = 0.0f;
@@ -1830,10 +2205,16 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
 
 void AstarOctoPlanner::octomapCallback(const octomap_msgs::msg::Octomap::SharedPtr msg)
 {
-  // Deserialize octomap message into an AbstractOcTree
-  octomap::AbstractOcTree* tree_ptr = octomap_msgs::fullMsgToMap(*msg);
+  // Deserialize octomap message — auto-detect binary vs full format
+  octomap::AbstractOcTree* tree_ptr = nullptr;
+  if (msg->binary) {
+    tree_ptr = octomap_msgs::binaryMsgToMap(*msg);
+  } else {
+    tree_ptr = octomap_msgs::fullMsgToMap(*msg);
+  }
   if (!tree_ptr) {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to convert Octomap message to AbstractOcTree");
+    RCLCPP_ERROR(node_->get_logger(), "Failed to convert Octomap message to AbstractOcTree (binary=%s)",
+                 msg->binary ? "true" : "false");
     return;
   }
 
