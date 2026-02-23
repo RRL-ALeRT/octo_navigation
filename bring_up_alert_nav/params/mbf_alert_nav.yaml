@@ -10,8 +10,7 @@ move_base_flex:
 
     planners: ['octo_planner']
     octo_planner:
-      type: 'astar_2d_planner/Astar2dPlanner'
-      #type: 'astar_octo_planner/AstarOctoPlanner'
+      type: 'astar_octo_planner/AstarOctoPlanner'
       cost_limit: 0.8
       publish_vector_field: true
     planner_patience: 10.0
