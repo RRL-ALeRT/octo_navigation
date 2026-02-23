@@ -205,26 +205,22 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
         auto t_pen_start = std::chrono::steady_clock::now();
 
         // ================================================================
-        // Centroid-shift edge detection (based on Ahmed et al.)
+        // DUAL penalty detection:
         //
-        // For each walkable node, find its k-nearest WALKABLE neighbors
-        // within a search radius (penalty_spread_radius_). Compute the
-        // centroid of those neighbors. If the centroid is far from the
-        // query point → the node is at an edge (wall-floor intersection)
-        // because neighbors are asymmetric (only on the floor side).
+        // 1) CENTROID-SHIFT (Ahmed et al.) — works great on flat floors
+        //    with walls. Tight z_tol keeps floors separate. Gives smooth
+        //    gradient from walls to floor center.
         //
-        // Interior floor nodes have symmetric neighbors → centroid ≈
-        // query point → shift ≈ 0 → zero penalty (green).
+        // 2) GRAPH-ADJACENCY BORDER — for ramp edges, cliffs, any plane
+        //    border without walls. Uses the graph adjacency list which
+        //    already correctly connects walkable nodes across slopes.
+        //    Checks angular XY coverage of walkable graph neighbors:
+        //    if incomplete → edge of walkable surface.
         //
-        // The shift magnitude directly gives a smooth gradient from
-        // walls (high) to center (zero). No explicit "spread" needed.
-        //
-        // Corner detection: PCA on the shift direction. If neighbors
-        // form a narrow angular cone → single wall. If they spread
-        // wide → corner (two walls meeting).
+        // Final penalty = max(centroid_shift_penalty, graph_border_penalty)
         // ================================================================
 
-        // Spatial hash of walkable nodes for fast XY neighbor lookup
+        // --- Spatial hash of walkable nodes for centroid-shift ---
         const double cell_size = active_voxel_size_ * 2.0;
         struct GridKey { int gx, gy; bool operator==(const GridKey &o) const { return gx==o.gx && gy==o.gy; } };
         struct GridHash { size_t operator()(const GridKey &k) const { return std::hash<int>()(k.gx) ^ (std::hash<int>()(k.gy) << 16); } };
@@ -233,32 +229,27 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
         struct WalkableEntry { std::string id; octomap::point3d center; double z; };
         std::vector<WalkableEntry> walkable_list;
         walkable_list.reserve(planning_graph->nodes.size());
+        // Also build id→index map for graph adjacency lookup
+        std::unordered_map<std::string, size_t> id_to_idx;
         for (const auto &kv : planning_graph->nodes) {
           if (!kv.second.is_walkable) continue;
           size_t idx = walkable_list.size();
           walkable_list.push_back({kv.first, kv.second.center, static_cast<double>(kv.second.center.z())});
+          id_to_idx[kv.first] = idx;
           int gx = static_cast<int>(std::floor(kv.second.center.x() / cell_size));
           int gy = static_cast<int>(std::floor(kv.second.center.y() / cell_size));
           walkable_grid[{gx, gy}].push_back(idx);
         }
 
-        // Search radius for neighbor collection (use penalty_spread_radius_
-        // from UI, default 0.6m). This controls how far the penalty gradient
-        // extends from walls into the floor interior.
+        // ---------- PART 1: Centroid-shift (flat floor + walls) ----------
         const double search_radius = std::max(penalty_spread_radius_, active_voxel_size_ * 3.0);
-        const double z_tol = active_voxel_size_ * 1.0; // same level only
+        const double z_tol = active_voxel_size_ * 1.0; // tight — flat surfaces only
         const int search_cells = static_cast<int>(std::ceil(search_radius / cell_size)) + 1;
-
-        // λ threshold from paper — scale-invariant classification.
-        // Higher λ → fewer edges detected. We use it to normalize the
-        // shift into a 0..1 range. shift / (search_radius) gives ratio.
-        // Points right at the wall edge have shift ≈ search_radius/2.
 
         size_t penalized_count = 0;
         size_t edge_count = 0;
         double max_shift_seen = 0.0;
 
-        // First pass: compute raw centroid shift for each walkable node
         struct ShiftInfo { double shift_xy = 0.0; double shift_x = 0.0; double shift_y = 0.0; int n_neighbors = 0; };
         std::vector<ShiftInfo> shift_data(walkable_list.size());
 
@@ -275,9 +266,9 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
               auto it = walkable_grid.find({gx+dgx, gy+dgy});
               if (it == walkable_grid.end()) continue;
               for (size_t nidx : it->second) {
-                if (nidx == wi) continue; // skip self
+                if (nidx == wi) continue;
                 const auto &nb = walkable_list[nidx];
-                if (std::abs(nb.z - w.z) > z_tol) continue; // same level
+                if (std::abs(nb.z - w.z) > z_tol) continue; // same level only
                 double dx = nb.center.x() - w.center.x();
                 double dy = nb.center.y() - w.center.y();
                 double dist = std::sqrt(dx*dx + dy*dy);
@@ -301,42 +292,27 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           }
         }
 
-        RCLCPP_INFO(node_->get_logger(),
-                    "Centroid-shift: max_shift=%.4f m, search_radius=%.2f m, walkable=%zu",
-                    max_shift_seen, search_radius, walkable_list.size());
-
-        // Second pass: convert shifts to penalties
-        // Normalize by search_radius/2 (theoretical max shift for a node
-        // at the very edge of a straight wall = ~half the search radius).
         const double norm_factor = search_radius * 0.5;
+
+        // ---------- PART 2: Compute both penalties per node ----------
+        size_t graph_border_count = 0;
 
         for (size_t wi = 0; wi < walkable_list.size(); ++wi) {
           const auto &w = walkable_list[wi];
           const auto &si = shift_data[wi];
-          double penalty = 0.0;
 
+          // --- Centroid-shift penalty ---
+          double cs_penalty = 0.0;
           if (si.n_neighbors >= 2 && si.shift_xy > 1e-6) {
-            // Ratio of shift to normalization factor: 0 (symmetric) to 1+ (edge)
-            double ratio = si.shift_xy / norm_factor;
-            ratio = std::min(ratio, 1.0); // cap at 1.0
-
-            // Apply wall_penalty_weight_ scaled by ratio²
-            // Quadratic makes interior fall off faster → green center
-            penalty = wall_penalty_weight_ * ratio * ratio;
-
+            double ratio = std::min(1.0, si.shift_xy / norm_factor);
+            cs_penalty = wall_penalty_weight_ * ratio * ratio;
             if (ratio > 0.3) ++edge_count;
 
-            // Corner detection: for edge nodes, check if neighbors
-            // are clustered in a narrow cone (single wall) or spread
-            // wide (corner = two walls meeting). Use variance of
-            // neighbor angles relative to shift direction.
+            // Corner detection for centroid-shift
             if (ratio > 0.2 && si.n_neighbors >= 4) {
-              // Compute angular spread of neighbors
               int gx = static_cast<int>(std::floor(w.center.x() / cell_size));
               int gy = static_cast<int>(std::floor(w.center.y() / cell_size));
               double shift_angle = std::atan2(si.shift_y, si.shift_x);
-
-              // Count how many angular quadrants (relative to shift dir) have neighbors
               int quadrant_mask = 0;
               for (int dgx = -search_cells; dgx <= search_cells; ++dgx) {
                 for (int dgy = -search_cells; dgy <= search_cells; ++dgy) {
@@ -348,13 +324,10 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
                     if (std::abs(nb.z - w.z) > z_tol) continue;
                     double dx = nb.center.x() - w.center.x();
                     double dy = nb.center.y() - w.center.y();
-                    double dist = std::sqrt(dx*dx + dy*dy);
-                    if (dist > search_radius) continue;
+                    if (dx*dx + dy*dy > search_radius * search_radius) continue;
                     double angle = std::atan2(dy, dx) - shift_angle;
-                    // Normalize to [-π, π]
                     while (angle > M_PI) angle -= 2.0 * M_PI;
                     while (angle < -M_PI) angle += 2.0 * M_PI;
-                    // Map to quadrant 0-3
                     int q;
                     if (angle >= -M_PI/4 && angle < M_PI/4) q = 0;
                     else if (angle >= M_PI/4 && angle < 3*M_PI/4) q = 1;
@@ -364,17 +337,60 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
                   }
                 }
               }
-
               int n_quadrants = __builtin_popcount(quadrant_mask);
-              // Single wall: neighbors in ~2 quadrants (opposite to wall)
-              // Corner: neighbors in only 1 quadrant (pushed into corner)
-              // If neighbors only fill 1-2 quadrants → strong corner
               if (n_quadrants <= 2 && ratio > 0.4) {
-                double corner_factor = (3.0 - n_quadrants) / 2.0; // 1q→1.0, 2q→0.5
-                penalty += corner_penalty_weight_ * ratio * corner_factor;
+                double corner_factor = (3.0 - n_quadrants) / 2.0;
+                cs_penalty += corner_penalty_weight_ * ratio * corner_factor;
               }
             }
           }
+
+          // --- Graph-adjacency border penalty (handles ramps/cliffs) ---
+          // Check which XY octants have walkable graph neighbors.
+          // The graph adjacency was built by buildConnectivityGraph() which
+          // connects nodes across height changes on ramps — no z_tol issue.
+          double gb_penalty = 0.0;
+          {
+            auto adj_it = planning_graph->adj.find(w.id);
+            int octant_mask = 0;
+            int walkable_neighbor_count = 0;
+
+            if (adj_it != planning_graph->adj.end()) {
+              for (const auto &nb_id : adj_it->second) {
+                auto nb_it = planning_graph->nodes.find(nb_id);
+                if (nb_it == planning_graph->nodes.end() || !nb_it->second.is_walkable) continue;
+                ++walkable_neighbor_count;
+                double dx = nb_it->second.center.x() - w.center.x();
+                double dy = nb_it->second.center.y() - w.center.y();
+                double angle = std::atan2(dy, dx);
+                // Map to octant 0-7
+                int octant = static_cast<int>(std::floor((angle + M_PI) / (M_PI / 4.0))) % 8;
+                octant_mask |= (1 << octant);
+              }
+            }
+
+            int covered_octants = __builtin_popcount(octant_mask);
+            // Full coverage = 8 octants → interior.
+            // Missing octants → border of walkable surface.
+            // This works on ramps because the graph connects across slopes.
+            if (covered_octants < 7 && walkable_neighbor_count >= 1) {
+              int missing = 8 - covered_octants;
+              double border_ratio = static_cast<double>(missing) / 8.0;
+              gb_penalty = wall_penalty_weight_ * border_ratio;
+
+              // Corner: many missing octants → exposed edge or corner
+              if (missing >= 4) {
+                gb_penalty += corner_penalty_weight_ * 0.5 * border_ratio;
+              }
+              ++graph_border_count;
+            } else if (walkable_neighbor_count == 0) {
+              // Isolated node → high penalty
+              gb_penalty = wall_penalty_weight_;
+            }
+          }
+
+          // Final penalty: max of both detectors
+          double penalty = std::max(cs_penalty, gb_penalty);
 
           planning_graph->node_penalty[w.id] = penalty;
           if (penalty > 1e-9) {
@@ -393,8 +409,8 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
         auto t_pen_end = std::chrono::steady_clock::now();
         double dur_pen = std::chrono::duration_cast<std::chrono::duration<double>>(t_pen_end - t_pen_start).count();
         RCLCPP_INFO(node_->get_logger(),
-                    "Penalty: %.3f s, walkable=%zu, edges(>0.3)=%zu, penalized=%zu (search_r=%.2fm, max_shift=%.4fm)",
-                    dur_pen, walkable_list.size(), edge_count, penalized_count, search_radius, max_shift_seen);
+                    "Penalty: %.3f s, walkable=%zu, cs_edges=%zu, graph_borders=%zu, penalized=%zu (search_r=%.2fm)",
+                    dur_pen, walkable_list.size(), edge_count, graph_border_count, penalized_count, search_radius);
 
         // Publish penalty markers now that they're computed
         if (publish_graph_markers_ && graph_marker_pub_) {
