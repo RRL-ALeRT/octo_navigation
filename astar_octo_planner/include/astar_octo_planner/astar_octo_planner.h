@@ -195,6 +195,16 @@ private:
   // to be a genuine floor/ramp surface (rejects thin wall tops).
   bool hasFloorSupport(double x, double y, double z, double node_size) const;
 
+  // Check whether a node that failed vertical clearance is actually a stair tread.
+  // Returns true if the blocking voxel above is at a valid step-rise height and the
+  // blocking voxel itself has floor support (i.e. is a horizontal surface, not a wall).
+  bool isStairStep(double x, double y, double voxel_top, double node_size) const;
+
+  // Detect stair regions by finding chains of horizontally-supported occupied surfaces
+  // at regular step-rise intervals. Promotes detected stair treads to walkable and
+  // injects direct edges between consecutive treads.
+  void detectAndAugmentStairs();
+
   // Check that a straight-line edge between two 3D points is collision-free
   // at robot body heights (samples multiple Z slices between ground and robot_height_).
   bool isEdgeCollisionFree(const octomap::point3d& from, const octomap::point3d& to) const;
@@ -260,6 +270,13 @@ private:
   bool enable_stair_edges_ = true;
   double stair_xy_radius_ = 0.15;
   double stair_vertical_margin_ = 0.05;
+  double stair_adjacency_multiplier_ = 5.0;  // adjacency radius multiplier for stair-step nodes (vs 1.8 for normal)
+  double max_bridge_dist_ = 0.3;  // max bridge gap (meters) between disconnected components
+  double stair_min_rise_ = 0.08;   // min vertical rise between consecutive treads (m)
+  double stair_max_rise_ = 0.35;   // max vertical rise between consecutive treads (m)
+  double stair_max_xy_dist_ = 0.40; // max horizontal distance between consecutive treads (m)
+  int    stair_min_chain_length_ = 3; // minimum treads to qualify as a staircase
+  double stair_max_tread_thickness_ = 0.25; // max vertical thickness (m) of occupied column to count as a tread (rejects walls)
 
   // Minimum bound for the occupancy grid.
   std::array<double, 3> min_bound_;
@@ -308,6 +325,7 @@ private:
     octomap::point3d center;
     double size = 0.0;
     bool is_walkable = true;  // true = floor surface with clearance, false = wall/obstacle
+    bool is_stair_step = false; // true = node was rescued by isStairStep() (needs wider adjacency)
     std::string id() const {
       char buf[128];
       std::snprintf(buf, sizeof(buf), "%u_%u_%u_%u", key.k[0], key.k[1], key.k[2], depth);

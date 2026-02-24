@@ -445,10 +445,11 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           }
         }
 
-        // Non-walkable nodes: zero penalty
+        // Non-walkable nodes: max penalty (walls/obstacles are impassable)
         for (const auto &kv : planning_graph->nodes) {
           if (!kv.second.is_walkable) {
-            planning_graph->node_penalty[kv.first] = 0.0;
+            planning_graph->node_penalty[kv.first] = wall_penalty_weight_;
+            planning_graph->penalized_nodes.insert(kv.first);
           }
         }
 
@@ -733,13 +734,12 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           }
         }
 
-        // --- Bridge planning: find closest pair between components and stitch paths ---
-        // The A* start component uses isEdgeCollisionFree (strict), and the goal BFS uses
-        // walkable adjacency. Nodes between them may be in neither set. So we search ALL
-        // walkable nodes in the graph to find the closest pair that spans the gap.
-        //
-        // Strategy: Run a walkable-only BFS from start (ignoring isEdgeCollisionFree) to
-        // get the true start walkable component, then bridge from that to the goal component.
+        // --- Bridge planning: plan from each side toward the gap, stitch if close ---
+        // Strategy:
+        //  1) BFS from start to get its walkable component
+        //  2) A* from start → closest-to-goal node within start component
+        //  3) A* from goal  → closest-to-start node within goal component
+        //  4) Stitch the two paths only if the gap between endpoints ≤ max_bridge_dist_
         std::unordered_set<std::string> start_walkable_component;
         {
           std::queue<std::string> bfs_q;
@@ -761,171 +761,153 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           "Bridge search: start walkable BFS=%zu nodes (A* expanded=%zu), goal walkable BFS=%zu nodes",
           start_walkable_component.size(), expanded_set.size(), goal_component.size());
 
-        std::string bridge_start_id, bridge_goal_id;
-        double bridge_dist_sq = std::numeric_limits<double>::infinity();
+        // --- Path 1: A* from start → closest node to goal within start component ---
+        std::vector<std::string> path_start_to_edge;
+        std::string start_edge_id;
+        {
+          // Heuristic: straight-line distance to goal
+          auto h_to_goal = [&](const std::string &a) -> double {
+            auto it = local_nodes.find(a);
+            auto it2 = local_nodes.find(goal_id);
+            if (it == local_nodes.end() || it2 == local_nodes.end()) return 0.0;
+            return it->second.center.distance(it2->second.center);
+          };
 
-        // Collect walkable nodes EXCLUSIVE to each component for the bridge search
-        std::vector<std::pair<std::string, octomap::point3d>> start_walkable_pts;
-        std::vector<std::pair<std::string, octomap::point3d>> goal_walkable_pts;
-        for (const auto &nid : start_walkable_component) {
-          if (goal_component.count(nid)) continue;
-          auto it_n = local_nodes.find(nid);
-          if (it_n != local_nodes.end() && it_n->second.is_walkable) {
-            start_walkable_pts.emplace_back(nid, it_n->second.center);
-          }
-        }
-        for (const auto &nid : goal_component) {
-          if (start_walkable_component.count(nid)) continue;
-          auto it_n = local_nodes.find(nid);
-          if (it_n != local_nodes.end() && it_n->second.is_walkable) {
-            goal_walkable_pts.emplace_back(nid, it_n->second.center);
-          }
-        }
+          std::unordered_map<std::string, double> gs1;
+          std::unordered_map<std::string, std::string> cf1;
+          std::priority_queue<PQItem, std::vector<PQItem>, PQCmp> oq1;
 
-        RCLCPP_INFO(node_->get_logger(),
-          "Bridge candidates: start_pts=%zu, goal_pts=%zu",
-          start_walkable_pts.size(), goal_walkable_pts.size());
+          oq1.push({start_id, h_to_goal(start_id), 0.0});
+          gs1[start_id] = 0.0;
 
-        // Find closest pair
-        for (const auto &[sid, spt] : start_walkable_pts) {
-          for (const auto &[gid, gpt] : goal_walkable_pts) {
-            double dx = spt.x() - gpt.x();
-            double dy = spt.y() - gpt.y();
-            double dz = spt.z() - gpt.z();
-            double d2 = dx*dx + dy*dy + dz*dz;
-            if (d2 < bridge_dist_sq) {
-              bridge_dist_sq = d2;
-              bridge_start_id = sid;
-              bridge_goal_id = gid;
+          // Track the node closest to goal (by heuristic) among all expanded
+          double best_h = std::numeric_limits<double>::infinity();
+
+          while (!oq1.empty()) {
+            PQItem cur = oq1.top(); oq1.pop();
+            if (gs1.find(cur.id) != gs1.end() && cur.g > gs1.at(cur.id)) continue;
+            if (start_walkable_component.count(cur.id) == 0) continue;
+
+            double h = h_to_goal(cur.id);
+            if (h < best_h) {
+              best_h = h;
+              start_edge_id = cur.id;
             }
-          }
-        }
 
-        double bridge_dist = std::sqrt(bridge_dist_sq);
-        const double max_bridge_dist = 0.3; // Only bridge small gaps (up to 30 cm)
-
-        if (!bridge_start_id.empty() && !bridge_goal_id.empty() && bridge_dist <= max_bridge_dist) {
-          RCLCPP_WARN(node_->get_logger(),
-            "BRIDGE PLANNING: bridging %.3f m gap between %s and %s",
-            bridge_dist, bridge_start_id.c_str(), bridge_goal_id.c_str());
-
-          // Run A* within start walkable component: start → bridge_start
-          // (using walkable adjacency, no isEdgeCollisionFree, to avoid the disconnect)
-          std::vector<std::string> path_to_bridge;
-          {
-            std::unordered_map<std::string, double> gs1;
-            std::unordered_map<std::string, std::string> cf1;
-            std::priority_queue<PQItem, std::vector<PQItem>, PQCmp> oq1;
-
-            auto h_bridge_start = [&](const std::string &a) -> double {
-              auto it = local_nodes.find(a);
-              auto it2 = local_nodes.find(bridge_start_id);
-              if (it == local_nodes.end() || it2 == local_nodes.end()) return 0.0;
-              return it->second.center.distance(it2->second.center);
-            };
-
-            oq1.push({start_id, h_bridge_start(start_id), 0.0});
-            gs1[start_id] = 0.0;
-
-            while (!oq1.empty()) {
-              PQItem cur = oq1.top(); oq1.pop();
-              if (cur.id == bridge_start_id) {
-                std::string u = bridge_start_id;
-                while (cf1.find(u) != cf1.end()) { path_to_bridge.push_back(u); u = cf1.at(u); }
-                path_to_bridge.push_back(start_id);
-                std::reverse(path_to_bridge.begin(), path_to_bridge.end());
-                break;
-              }
-              if (gs1.find(cur.id) != gs1.end() && cur.g > gs1.at(cur.id)) continue;
-              if (start_walkable_component.count(cur.id) == 0) continue;
-              auto it_a1 = local_adj.find(cur.id);
-              if (it_a1 == local_adj.end()) continue;
-              for (const auto &nb : it_a1->second) {
-                if (local_nodes.find(nb) == local_nodes.end()) continue;
-                if (!local_nodes.at(nb).is_walkable) continue;
-                if (start_walkable_component.count(nb) == 0) continue;
-                double mc = local_nodes.at(cur.id).center.distance(local_nodes.at(nb).center);
-                double pen = getPrecomputedPenalty(nb);
-                double tent = cur.g + mc + pen;
-                if (gs1.find(nb) == gs1.end() || tent < gs1[nb]) {
-                  cf1[nb] = cur.id;
-                  gs1[nb] = tent;
-                  oq1.push({nb, tent + h_bridge_start(nb), tent});
-                }
+            auto it_a1 = local_adj.find(cur.id);
+            if (it_a1 == local_adj.end()) continue;
+            for (const auto &nb : it_a1->second) {
+              if (local_nodes.find(nb) == local_nodes.end()) continue;
+              if (!local_nodes.at(nb).is_walkable) continue;
+              if (start_walkable_component.count(nb) == 0) continue;
+              double mc = local_nodes.at(cur.id).center.distance(local_nodes.at(nb).center);
+              double pen = getPrecomputedPenalty(nb);
+              double tent = cur.g + mc + pen;
+              if (gs1.find(nb) == gs1.end() || tent < gs1[nb]) {
+                cf1[nb] = cur.id;
+                gs1[nb] = tent;
+                oq1.push({nb, tent + h_to_goal(nb), tent});
               }
             }
           }
 
-          // Run A* within goal component: bridge_goal → goal
-          // (using raw adjacency — no isEdgeCollisionFree — to avoid re-creating the disconnect)
-          std::vector<std::string> path_from_bridge;
-          {
-            std::unordered_map<std::string, double> gs2;
-            std::unordered_map<std::string, std::string> cf2;
-            std::priority_queue<PQItem, std::vector<PQItem>, PQCmp> oq2;
+          // Reconstruct path from start → start_edge_id
+          if (!start_edge_id.empty()) {
+            std::string u = start_edge_id;
+            while (cf1.find(u) != cf1.end()) { path_start_to_edge.push_back(u); u = cf1.at(u); }
+            path_start_to_edge.push_back(start_id);
+            std::reverse(path_start_to_edge.begin(), path_start_to_edge.end());
+          }
+        }
 
-            oq2.push({bridge_goal_id, heuristic_local(bridge_goal_id), 0.0});
-            gs2[bridge_goal_id] = 0.0;
+        // --- Path 2: A* from goal → closest node to start within goal component ---
+        std::vector<std::string> path_goal_to_edge;
+        std::string goal_edge_id;
+        {
+          // Heuristic: straight-line distance to start
+          auto h_to_start = [&](const std::string &a) -> double {
+            auto it = local_nodes.find(a);
+            auto it2 = local_nodes.find(start_id);
+            if (it == local_nodes.end() || it2 == local_nodes.end()) return 0.0;
+            return it->second.center.distance(it2->second.center);
+          };
 
-            while (!oq2.empty()) {
-              PQItem cur = oq2.top(); oq2.pop();
-              if (cur.id == goal_id) {
-                // Reconstruct
-                std::string u = goal_id;
-                while (cf2.find(u) != cf2.end()) { path_from_bridge.push_back(u); u = cf2.at(u); }
-                path_from_bridge.push_back(bridge_goal_id);
-                std::reverse(path_from_bridge.begin(), path_from_bridge.end());
-                break;
-              }
-              if (gs2.find(cur.id) != gs2.end() && cur.g > gs2.at(cur.id)) continue;
-              // Only expand within the goal component
-              if (goal_component.count(cur.id) == 0) continue;
-              auto it_a2 = local_adj.find(cur.id);
-              if (it_a2 == local_adj.end()) continue;
-              for (const auto &nb : it_a2->second) {
-                if (local_nodes.find(nb) == local_nodes.end()) continue;
-                if (!local_nodes.at(nb).is_walkable) continue;
-                if (goal_component.count(nb) == 0) continue;
-                double mc = local_nodes.at(cur.id).center.distance(local_nodes.at(nb).center);
-                double pen = getPrecomputedPenalty(nb);
-                double tent = cur.g + mc + pen;
-                if (gs2.find(nb) == gs2.end() || tent < gs2[nb]) {
-                  cf2[nb] = cur.id;
-                  gs2[nb] = tent;
-                  oq2.push({nb, tent + heuristic_local(nb), tent});
-                }
+          std::unordered_map<std::string, double> gs2;
+          std::unordered_map<std::string, std::string> cf2;
+          std::priority_queue<PQItem, std::vector<PQItem>, PQCmp> oq2;
+
+          oq2.push({goal_id, h_to_start(goal_id), 0.0});
+          gs2[goal_id] = 0.0;
+
+          double best_h = std::numeric_limits<double>::infinity();
+
+          while (!oq2.empty()) {
+            PQItem cur = oq2.top(); oq2.pop();
+            if (gs2.find(cur.id) != gs2.end() && cur.g > gs2.at(cur.id)) continue;
+            if (goal_component.count(cur.id) == 0) continue;
+
+            double h = h_to_start(cur.id);
+            if (h < best_h) {
+              best_h = h;
+              goal_edge_id = cur.id;
+            }
+
+            auto it_a2 = local_adj.find(cur.id);
+            if (it_a2 == local_adj.end()) continue;
+            for (const auto &nb : it_a2->second) {
+              if (local_nodes.find(nb) == local_nodes.end()) continue;
+              if (!local_nodes.at(nb).is_walkable) continue;
+              if (goal_component.count(nb) == 0) continue;
+              double mc = local_nodes.at(cur.id).center.distance(local_nodes.at(nb).center);
+              double pen = getPrecomputedPenalty(nb);
+              double tent = cur.g + mc + pen;
+              if (gs2.find(nb) == gs2.end() || tent < gs2[nb]) {
+                cf2[nb] = cur.id;
+                gs2[nb] = tent;
+                oq2.push({nb, tent + h_to_start(nb), tent});
               }
             }
           }
 
-          if (!path_to_bridge.empty() && !path_from_bridge.empty()) {
-            RCLCPP_INFO(node_->get_logger(),
-              "BRIDGE PATH: start→bridge=%zu nodes, bridge gap=%.3f m, bridge→goal=%zu nodes",
-              path_to_bridge.size(), bridge_dist, path_from_bridge.size());
+          // Reconstruct path from goal → goal_edge_id (we'll reverse later)
+          if (!goal_edge_id.empty()) {
+            std::string u = goal_edge_id;
+            while (cf2.find(u) != cf2.end()) { path_goal_to_edge.push_back(u); u = cf2.at(u); }
+            path_goal_to_edge.push_back(goal_id);
+            std::reverse(path_goal_to_edge.begin(), path_goal_to_edge.end());
+            // path_goal_to_edge is now: goal → ... → goal_edge_id
+            // We need it as: goal_edge_id → ... → goal (for stitching)
+            std::reverse(path_goal_to_edge.begin(), path_goal_to_edge.end());
+          }
+        }
 
-            // Stitch the full path: path_to_bridge + bridge_goal_path
+        // --- Check the gap and stitch ---
+        if (!path_start_to_edge.empty() && !path_goal_to_edge.empty()) {
+          const auto& se_node = local_nodes.at(start_edge_id);
+          const auto& ge_node = local_nodes.at(goal_edge_id);
+          double gap = se_node.center.distance(ge_node.center);
+
+          RCLCPP_INFO(node_->get_logger(),
+            "Bridge: start→edge=%zu nodes (edge=%s), goal→edge=%zu nodes (edge=%s), gap=%.3f m (max=%.3f m)",
+            path_start_to_edge.size(), start_edge_id.c_str(),
+            path_goal_to_edge.size(), goal_edge_id.c_str(),
+            gap, max_bridge_dist_);
+
+          if (gap <= max_bridge_dist_) {
+            // Stitch: path_start_to_edge + path_goal_to_edge (goal_edge→...→goal)
             path_ids.clear();
-            for (const auto &pid : path_to_bridge) path_ids.push_back(pid);
-            for (const auto &pid : path_from_bridge) path_ids.push_back(pid);
-
-            RCLCPP_INFO(node_->get_logger(), "Bridge path total: %zu waypoints", path_ids.size());
+            for (const auto &pid : path_start_to_edge) path_ids.push_back(pid);
+            for (const auto &pid : path_goal_to_edge) path_ids.push_back(pid);
+            RCLCPP_INFO(node_->get_logger(),
+              "Bridge path stitched: %zu waypoints (gap %.3f m)", path_ids.size(), gap);
           } else {
-            if (path_to_bridge.empty()) {
-              RCLCPP_WARN(node_->get_logger(),
-                "Bridge planning failed: no path from start to bridge_start within start component");
-            }
-            if (path_from_bridge.empty()) {
-              RCLCPP_WARN(node_->get_logger(),
-                "Bridge planning failed: no path from bridge_goal to goal within goal component");
-            }
+            RCLCPP_WARN(node_->get_logger(),
+              "Bridge gap too large (%.3f m > %.3f m max) — not bridging", gap, max_bridge_dist_);
           }
-        } else if (!bridge_start_id.empty() && !bridge_goal_id.empty()) {
-          RCLCPP_WARN(node_->get_logger(),
-            "Bridge gap too large (%.3f m > %.3f m max) — not bridging", bridge_dist, max_bridge_dist);
         } else {
           RCLCPP_WARN(node_->get_logger(),
-            "Bridge planning skipped: no candidate pairs found (start_pts=%zu, goal_pts=%zu)",
-            start_walkable_pts.size(), goal_walkable_pts.size());
+            "Bridge planning failed: start_path=%zu, goal_path=%zu",
+            path_start_to_edge.size(), path_goal_to_edge.size());
         }
 
         // If bridge planning succeeded, path_ids is non-empty and we fall through
@@ -1164,7 +1146,17 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
       if (nn && octree_->isNodeOccupied(nn)) { vertical_clear = false; break; }
     }
     // Count but don't skip non-walkable nodes — they're included for visualization
-    if (!vertical_clear) { ++skipped_collision; }
+    bool stair_rescued = false;
+    if (!vertical_clear) {
+      // Stair-step rescue: if the blocker above is a valid stair tread,
+      // treat this node as walkable anyway
+      if (isStairStep(occ.x(), occ.y(), voxel_top, octree_->getNodeSize(it.getDepth()))) {
+        vertical_clear = true;
+        stair_rescued = true;
+      } else {
+        ++skipped_collision;
+      }
+    }
 
     // Floor support check: verify the surface has enough horizontal extent
     // (rejects thin wall tops that pass vertical clearance)
@@ -1186,6 +1178,7 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
     gn.center = center;
     gn.size = size;
     gn.is_walkable = vertical_clear;  // floor = true, wall = false
+    gn.is_stair_step = stair_rescued;   // wider adjacency radius for stair treads
 
     // create stable id
     char idbuf[128];
@@ -1197,11 +1190,16 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
     ++inserted;
   }
 
-  // RCLCPP_INFO(node_->get_logger(), "Graph build stats: total_leafs=%zu free_leafs=%zu nonfinite=%zu out_of_bounds=%zu inserted=%zu",
-  //             total_leafs, free_leafs, skipped_nonfinite, skipped_out_of_bounds, inserted);
-  // RCLCPP_INFO(node_->get_logger(), "Graph build extra: skipped_collision=%zu", skipped_collision);
-  // RCLCPP_INFO(node_->get_logger(), "Graph build extra: skipped_no_surface=%zu", skipped_no_surface);
-  // RCLCPP_INFO(node_->get_logger(), "Graph build extra: skipped_step_too_high=%zu", skipped_step_too_high);
+  // Count stair-step nodes for diagnostics
+  size_t stair_step_count = 0;
+  size_t walkable_count = 0;
+  for (const auto& [id, gn] : graph_nodes_) {
+    if (gn.is_walkable) ++walkable_count;
+    if (gn.is_stair_step) ++stair_step_count;
+  }
+  RCLCPP_INFO(node_->get_logger(),
+    "Graph build: %zu nodes (%zu walkable, %zu stair-step rescued, adjacency multiplier=%.1f)",
+    graph_nodes_.size(), walkable_count, stair_step_count, stair_adjacency_multiplier_);
 
   std::vector<std::pair<std::string, GraphNode>> node_snapshot;
   node_snapshot.reserve(graph_nodes_.size());
@@ -1234,12 +1232,15 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
     }
   };
 
-  // Simple spatial adjacency: connect nodes within ~1.5 voxel distance
+  // Simple spatial adjacency: connect nodes within ~1.8 voxel distance
+  // Stair-step nodes use a wider radius to bridge consecutive stair treads
   auto neighbor_worker = [&](size_t start, size_t end) {
     for (size_t idx = start; idx < end; ++idx) {
       const auto &id = node_snapshot[idx].first;
       const GraphNode &node = node_snapshot[idx].second;
-      double max_dist = node.size * 1.8;  // ~1.8 voxel distance for diagonal neighbors
+      // Use wider adjacency radius for stair-step nodes (treads are ~0.3-0.4m apart in 3D)
+      double multiplier = node.is_stair_step ? stair_adjacency_multiplier_ : 1.8;
+      double max_dist = node.size * multiplier;
       double max_dist_sq = max_dist * max_dist;
 
       // Check all other nodes for proximity
@@ -1250,7 +1251,14 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
         double dy = other.center.y() - node.center.y();
         double dz = other.center.z() - node.center.z();
         double dist_sq = dx*dx + dy*dy + dz*dz;
-        if (dist_sq <= max_dist_sq) {
+        // Use the wider radius if either node is a stair step (ensures connectivity
+        // between stair treads and between stair treads and adjacent floor nodes)
+        double effective_max_sq = max_dist_sq;
+        if (other.is_stair_step && !node.is_stair_step) {
+          double stair_max = other.size * stair_adjacency_multiplier_;
+          effective_max_sq = stair_max * stair_max;
+        }
+        if (dist_sq <= effective_max_sq) {
           add_edge(idx, node_snapshot[j].first);
         }
       }
@@ -1282,6 +1290,10 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
       graph_adj_[node_snapshot[idx].first] = std::move(adjacency[idx]);
     }
   }
+
+  // --- Detect stair regions and inject stair-tread edges ---
+  // Must run after normal adjacency is built so stair edges are additive.
+  detectAndAugmentStairs();
 
   std::unordered_map<std::string, size_t> node_index;
   node_index.reserve(node_snapshot.size());
@@ -1443,6 +1455,15 @@ void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
       if (nn && octree_->isNodeOccupied(nn)) { vertical_clear = false; break; }
     }
     // Include non-walkable voxels in graph for visualization (A* skips them)
+    // Stair-step rescue: if the blocker above is a valid stair tread,
+    // treat this node as walkable anyway
+    bool stair_rescued = false;
+    if (!vertical_clear) {
+      if (isStairStep(occ.x(), occ.y(), voxel_top, node_size)) {
+        vertical_clear = true;
+        stair_rescued = true;
+      }
+    }
 
     // Floor support check: verify the surface has enough horizontal extent
     if (vertical_clear) {
@@ -1460,6 +1481,7 @@ void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
     gn.center = center;
     gn.size = node_size;
     gn.is_walkable = vertical_clear;  // floor = true, wall = false
+    gn.is_stair_step = stair_rescued;  // wider adjacency for stair treads
 
     // Create stable id
     char idbuf[128];
@@ -1561,8 +1583,9 @@ void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
 
       if (best_id.empty() || best_id == node_id) continue;
 
-      // Match the full-build distance threshold (1.8x) to avoid connectivity gaps
-      double thresh = node.size * 1.8;
+      // Match the full-build distance threshold; use wider radius for stair-step nodes
+      double inc_mult = node.is_stair_step ? stair_adjacency_multiplier_ : 1.8;
+      double thresh = node.size * inc_mult;
       if (best_dist > thresh * thresh) continue;
 
       // Line-of-sight check
@@ -1599,17 +1622,23 @@ void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
     }
 
     // --- Direct distance-based adjacency (octree-independent) ---
-    // Mirror the full-build approach: connect to ANY graph node within 1.8x
-    // voxel distance. This ensures connectivity even when the octree has
-    // been cleared (e.g. by clearOccupiedCylinderAround) or has gaps.
-    double max_dist_sq = (node.size * 1.8) * (node.size * 1.8);
+    // Mirror the full-build approach: connect to ANY graph node within proper radius.
+    // Use wider radius for stair-step nodes to ensure stair tread connectivity.
+    double inc_direct_mult = node.is_stair_step ? stair_adjacency_multiplier_ : 1.8;
+    double max_dist_sq = (node.size * inc_direct_mult) * (node.size * inc_direct_mult);
     for (const auto& [cand_id, cand_node] : all_nodes_snapshot) {
       if (cand_id == node_id) continue;
       double dx = cand_node.center.x() - node.center.x();
       double dy = cand_node.center.y() - node.center.y();
       double dz = cand_node.center.z() - node.center.z();
       double dsq = dx*dx + dy*dy + dz*dz;
-      if (dsq > max_dist_sq) continue;
+      // Also accept if the candidate is a stair step with wider radius
+      double effective_max = max_dist_sq;
+      if (cand_node.is_stair_step && !node.is_stair_step) {
+        double sm = cand_node.size * stair_adjacency_multiplier_;
+        effective_max = sm * sm;
+      }
+      if (dsq > effective_max) continue;
       // Add edge if not already present (skip LOS check, matching full build)
       if (std::find(adj.begin(), adj.end(), cand_id) == adj.end()) {
         adj.push_back(cand_id);
@@ -1750,19 +1779,21 @@ void AstarOctoPlanner::publishGraphMarkers(const std::shared_ptr<GraphData>& gra
   pen_m.scale.y = static_cast<float>(scale);
   pen_m.scale.z = static_cast<float>(scale);
 
-  // Show ALL walkable nodes with green→red gradient based on penalty.
-  // Zero-penalty nodes are rendered as green so there are no holes.
+  // Show ALL nodes with green→red gradient based on penalty.
+  // Non-walkable nodes appear as full red. Zero-penalty walkable = green.
   for (const auto &kv : graph->nodes) {
-    if (!kv.second.is_walkable) continue;
     geometry_msgs::msg::Point p;
     p.x = kv.second.center.x();
     p.y = kv.second.center.y();
     p.z = kv.second.center.z();
     pen_m.points.push_back(p);
-    // Look up penalty (0 if not in map)
     double pen = 0.0;
-    auto pit = graph->node_penalty.find(kv.first);
-    if (pit != graph->node_penalty.end()) pen = pit->second;
+    if (!kv.second.is_walkable) {
+      pen = wall_penalty_weight_;  // non-walkable = full red
+    } else {
+      auto pit = graph->node_penalty.find(kv.first);
+      if (pit != graph->node_penalty.end()) pen = pit->second;
+    }
     // color ramp: low green -> high red (normalized to wall_penalty_weight_)
     std_msgs::msg::ColorRGBA c;
     double v = std::min(1.0, pen / std::max(1e-6, wall_penalty_weight_));
@@ -1967,6 +1998,200 @@ bool AstarOctoPlanner::hasFloorSupport(double x, double y, double z, double node
   return ratio >= min_floor_support_ratio_;
 }
 
+// Stair-step rescue: when a node fails vertical clearance, check if the first
+// occupied voxel above is a stair tread rather than a wall.
+// Criteria (adapted from OSHA stair standards):
+//  1) The blocking voxel is within a valid step-rise height (0.10 – 0.35m above voxel top)
+//  2) The blocking voxel has floor support (horizontal surface, not a thin wall top)
+//  3) There is clearance above the blocking voxel (robot can stand on the next step)
+// This lets stair treads be classified as walkable while walls (tall continuous
+// vertical occupation) remain non-walkable.
+bool AstarOctoPlanner::isStairStep(double x, double y, double voxel_top, double node_size) const
+{
+  if (!octree_) return false;
+
+  const double min_rise = 0.10;  // minimum step rise
+  const double max_rise = 0.35;  // maximum step rise (slightly above OSHA 0.30 for tolerance)
+  const double step_z = std::max(active_voxel_size_, 0.05);
+
+  // Find the first occupied voxel above voxel_top
+  double blocker_z = -1.0;
+  for (double z = voxel_top + 0.01; z <= voxel_top + robot_height_; z += step_z) {
+    octomap::OcTreeNode* nn = octree_->search(x, y, z);
+    if (nn && octree_->isNodeOccupied(nn)) {
+      blocker_z = z;
+      break;
+    }
+  }
+  if (blocker_z < 0.0) return false;  // no blocker found (shouldn't happen)
+
+  double rise = blocker_z - voxel_top;
+  // 1) Check step rise height
+  if (rise < min_rise || rise > max_rise) return false;
+
+  // 2) Check that the blocker has floor support (it's a horizontal surface, not a wall)
+  if (!hasFloorSupport(x, y, blocker_z, node_size)) return false;
+
+  // 3) Check there's clearance above the blocker for the robot to stand on it
+  //    (at least min_vertical_clearance_ above the blocker's top)
+  double blocker_top = blocker_z + 0.5 * active_voxel_size_;
+  double clearance_needed = std::max(min_vertical_clearance_, robot_height_ * 0.5);
+  for (double z = blocker_top + 0.01; z <= blocker_top + clearance_needed; z += step_z) {
+    octomap::OcTreeNode* nn = octree_->search(x, y, z);
+    if (nn && octree_->isNodeOccupied(nn)) {
+      return false;  // not enough clearance above — this is a wall, not a stair
+    }
+  }
+
+  return true;  // valid stair tread above
+}
+
+// ---------------------------------------------------------------------------
+// Stair Region Detection and Augmentation
+// ---------------------------------------------------------------------------
+// Detects stair regions by finding clusters of occupied surfaces (nodes with
+// floor support) that are separated by valid step-rise heights. When a cluster
+// has >= stair_min_chain_length_ nodes, all nodes are promoted to walkable
+// stair-step nodes and direct edges are injected between consecutive treads.
+// This replaces the per-voxel isStairStep() rescue for reliable multi-step
+// stair connectivity.
+void AstarOctoPlanner::detectAndAugmentStairs()
+{
+  if (!enable_stair_edges_ || !octree_) return;
+
+  const double voxel_sz = std::max(active_voxel_size_, 0.05);
+
+  // --- Step 1: Collect all candidate treads (occupied nodes with floor support) ---
+  // Additionally, reject nodes with tall vertical columns of occupied voxels
+  // (thin walls between stair flights). Real stair treads are thin horizontal
+  // surfaces — typically ≤ stair_max_tread_thickness_ (0.25m) of continuous
+  // vertical occupation.
+  struct TreadCandidate {
+    std::string id;
+    double x, y, z;
+  };
+  std::vector<TreadCandidate> candidates;
+  candidates.reserve(graph_nodes_.size() / 2);
+
+  for (auto& [id, node] : graph_nodes_) {
+    if (!hasFloorSupport(node.center.x(), node.center.y(), node.center.z(), node.size))
+      continue;
+
+    // Measure vertical thickness: count consecutive occupied voxels below and above
+    double cx = node.center.x(), cy = node.center.y(), cz = node.center.z();
+    double thickness_below = 0.0;
+    for (double z = cz - voxel_sz; z >= cz - 1.0; z -= voxel_sz) {
+      octomap::OcTreeNode* nn = octree_->search(cx, cy, z);
+      if (nn && octree_->isNodeOccupied(nn)) {
+        thickness_below += voxel_sz;
+      } else {
+        break;
+      }
+    }
+    double thickness_above = 0.0;
+    for (double z = cz + voxel_sz; z <= cz + 1.0; z += voxel_sz) {
+      octomap::OcTreeNode* nn = octree_->search(cx, cy, z);
+      if (nn && octree_->isNodeOccupied(nn)) {
+        thickness_above += voxel_sz;
+      } else {
+        break;
+      }
+    }
+    double total_thickness = thickness_below + voxel_sz + thickness_above;  // include self
+
+    // Skip if the vertical column is too tall — this is a wall, not a tread
+    if (total_thickness > stair_max_tread_thickness_) continue;
+
+    candidates.push_back({id, cx, cy, cz});
+  }
+
+  if (candidates.size() < static_cast<size_t>(stair_min_chain_length_)) return;
+
+  // --- Step 2: Build undirected "stair neighbor" graph ---
+  // Two candidates are stair-neighbors if their Z difference is a valid step rise
+  // and their XY distance is within one tread depth.
+  std::unordered_map<std::string, std::vector<std::string>> stair_adj;
+
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    for (size_t j = i + 1; j < candidates.size(); ++j) {
+      double dz = std::abs(candidates[j].z - candidates[i].z);
+      if (dz < stair_min_rise_ || dz > stair_max_rise_) continue;
+
+      double dxy = std::hypot(candidates[j].x - candidates[i].x,
+                              candidates[j].y - candidates[i].y);
+      if (dxy > stair_max_xy_dist_) continue;
+
+      stair_adj[candidates[i].id].push_back(candidates[j].id);
+      stair_adj[candidates[j].id].push_back(candidates[i].id);
+    }
+  }
+
+  // --- Step 3: BFS to find connected components; mark stair regions ---
+  std::unordered_set<std::string> visited;
+  size_t total_stair_nodes = 0;
+  size_t stair_regions = 0;
+
+  for (const auto& cand : candidates) {
+    if (visited.count(cand.id)) continue;
+    if (stair_adj.find(cand.id) == stair_adj.end()) continue;
+
+    // BFS to find the component
+    std::vector<std::string> component;
+    std::queue<std::string> bfs_q;
+    bfs_q.push(cand.id);
+    visited.insert(cand.id);
+    while (!bfs_q.empty()) {
+      std::string u = bfs_q.front(); bfs_q.pop();
+      component.push_back(u);
+      for (const auto& v : stair_adj[u]) {
+        if (visited.insert(v).second) {
+          bfs_q.push(v);
+        }
+      }
+    }
+
+    if (static_cast<int>(component.size()) < stair_min_chain_length_) continue;
+
+    // This component is a stair region
+    ++stair_regions;
+    total_stair_nodes += component.size();
+
+    // Mark all nodes in this stair region as walkable stair-step nodes
+    for (const auto& id : component) {
+      auto it = graph_nodes_.find(id);
+      if (it != graph_nodes_.end()) {
+        it->second.is_walkable = true;
+        it->second.is_stair_step = true;
+      }
+    }
+
+    // Inject edges between stair-neighbor nodes in this component.
+    // These edges may be longer than the normal 1.8x voxel adjacency,
+    // allowing the graph to traverse between consecutive stair treads.
+    for (const auto& id : component) {
+      auto sa_it = stair_adj.find(id);
+      if (sa_it == stair_adj.end()) continue;
+      for (const auto& nb : sa_it->second) {
+        // Only add if both are in this component (intersection guaranteed by BFS)
+        auto& adj = graph_adj_[id];
+        if (std::find(adj.begin(), adj.end(), nb) == adj.end()) {
+          adj.push_back(nb);
+        }
+        auto& rev = graph_adj_[nb];
+        if (std::find(rev.begin(), rev.end(), id) == rev.end()) {
+          rev.push_back(id);
+        }
+      }
+    }
+  }
+
+  if (total_stair_nodes > 0) {
+    RCLCPP_INFO(node_->get_logger(),
+      "Stair detection: %zu floor-supported candidates, %zu stair regions, %zu tread nodes promoted",
+      candidates.size(), stair_regions, total_stair_nodes);
+  }
+}
+
 // Edge collision check: sample points along the line from->to and at each sample
 // check multiple Z heights (from above surface up to robot_height_) for occupied voxels.
 // This prevents A* from connecting two walkable floor nodes across a wall.
@@ -2137,6 +2362,13 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
   enable_stair_edges_ = node_->declare_parameter(name_ + ".enable_stair_edges", enable_stair_edges_);
   stair_xy_radius_ = node_->declare_parameter(name_ + ".stair_xy_radius", stair_xy_radius_);
   stair_vertical_margin_ = node_->declare_parameter(name_ + ".stair_vertical_margin", stair_vertical_margin_);
+  stair_adjacency_multiplier_ = node_->declare_parameter(name_ + ".stair_adjacency_multiplier", stair_adjacency_multiplier_);
+  max_bridge_dist_ = node_->declare_parameter(name_ + ".max_bridge_dist", max_bridge_dist_);
+  stair_min_rise_ = node_->declare_parameter(name_ + ".stair_min_rise", stair_min_rise_);
+  stair_max_rise_ = node_->declare_parameter(name_ + ".stair_max_rise", stair_max_rise_);
+  stair_max_xy_dist_ = node_->declare_parameter(name_ + ".stair_max_xy_dist", stair_max_xy_dist_);
+  stair_min_chain_length_ = node_->declare_parameter(name_ + ".stair_min_chain_length", stair_min_chain_length_);
+  stair_max_tread_thickness_ = node_->declare_parameter(name_ + ".stair_max_tread_thickness", stair_max_tread_thickness_);
   // corner/edge penalty parameters
   corner_radius_ = node_->declare_parameter(name_ + ".corner_radius", 0.40);
   corner_penalty_weight_ = node_->declare_parameter(name_ + ".corner_penalty_weight", corner_penalty_weight_);
@@ -2479,6 +2711,27 @@ rcl_interfaces::msg::SetParametersResult AstarOctoPlanner::reconfigureCallback(s
     } else if (parameter.get_name() == name_ + ".stair_vertical_margin") {
       stair_vertical_margin_ = parameter.as_double();
       RCLCPP_INFO_STREAM(node_->get_logger(), "Updated stair_vertical_margin to " << stair_vertical_margin_);
+    } else if (parameter.get_name() == name_ + ".stair_adjacency_multiplier") {
+      stair_adjacency_multiplier_ = parameter.as_double();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated stair_adjacency_multiplier to " << stair_adjacency_multiplier_);
+    } else if (parameter.get_name() == name_ + ".max_bridge_dist") {
+      max_bridge_dist_ = parameter.as_double();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated max_bridge_dist to " << max_bridge_dist_);
+    } else if (parameter.get_name() == name_ + ".stair_min_rise") {
+      stair_min_rise_ = parameter.as_double();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated stair_min_rise to " << stair_min_rise_);
+    } else if (parameter.get_name() == name_ + ".stair_max_rise") {
+      stair_max_rise_ = parameter.as_double();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated stair_max_rise to " << stair_max_rise_);
+    } else if (parameter.get_name() == name_ + ".stair_max_xy_dist") {
+      stair_max_xy_dist_ = parameter.as_double();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated stair_max_xy_dist to " << stair_max_xy_dist_);
+    } else if (parameter.get_name() == name_ + ".stair_min_chain_length") {
+      stair_min_chain_length_ = parameter.as_int();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated stair_min_chain_length to " << stair_min_chain_length_);
+    } else if (parameter.get_name() == name_ + ".stair_max_tread_thickness") {
+      stair_max_tread_thickness_ = parameter.as_double();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated stair_max_tread_thickness to " << stair_max_tread_thickness_);
     } else if (parameter.get_name() == name_ + ".min_vertical_clearance") {
       min_vertical_clearance_ = parameter.as_double();
       RCLCPP_INFO_STREAM(node_->get_logger(), "Updated min_vertical_clearance to " << min_vertical_clearance_);
