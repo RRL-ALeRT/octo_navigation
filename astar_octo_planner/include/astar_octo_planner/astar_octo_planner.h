@@ -307,7 +307,7 @@ private:
   // Penalty spread
   double penalty_spread_radius_ = .5; // meters, radius within which to spread a fraction of the penalty
   double penalty_spread_factor_ = 1.0; // fraction [0..1] of the penalty to distribute among neighbors
-  int worker_thread_limit_ = 0; // 0 => auto (use hardware concurrency)
+  int worker_thread_limit_ = 10; // 0 => auto (use hardware concurrency)
 
   // Hash function for tuple<int, int, int> to track unique occupied voxels
   struct TupleHash {

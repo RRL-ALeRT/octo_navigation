@@ -886,83 +886,140 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
   graph_adj_.clear();
   if (!octree_) return;
 
-  // First pass: collect candidate free leaf nodes (use leaf iterator available in this OctoMap build)
+  // --- Phase 1 (single-threaded): Fast collect of occupied voxel data from octree iterator ---
+  // The octree leaf iterator is not thread-safe, so we collect lightweight
+  // voxel records first, then do the expensive checks in parallel.
+  struct RawVoxel {
+    octomap::point3d coord;
+    octomap::OcTreeKey key;
+    unsigned int depth;
+    double node_size;
+  };
+  std::vector<RawVoxel> raw_voxels;
+  raw_voxels.reserve(octree_->size()); // upper bound
   size_t total_leafs = 0;
-  size_t free_leafs = 0;
-  size_t skipped_nonfinite = 0;
-  size_t skipped_out_of_bounds = 0;
-  size_t skipped_collision = 0;
-  size_t skipped_no_surface = 0;
-  size_t skipped_step_too_high = 0;
-  size_t inserted = 0;
-  std::atomic<size_t> rejected_distance{0};
-  std::atomic<size_t> rejected_los{0};
 
-  //Build graph from ALL occupied leafs (floor surfaces + walls)
   for (auto it = octree_->begin_leafs(), end = octree_->end_leafs(); it != end; ++it) {
     ++total_leafs;
     if (!octree_->isNodeOccupied(*it)) continue;
-    ++free_leafs; // reusing counter for occupied samples here
     octomap::point3d occ = it.getCoordinate();
-    // Use actual voxel center (no nudge)
-    double node_z = occ.z();
-    if (!std::isfinite(occ.x()) || !std::isfinite(occ.y()) || !std::isfinite(node_z)) { ++skipped_nonfinite; continue; }
+    if (!std::isfinite(occ.x()) || !std::isfinite(occ.y()) || !std::isfinite(occ.z())) continue;
     if (occ.x() < min_bound_[0] - 1e-6 || occ.x() > max_bound_[0] + 1e-6 ||
         occ.y() < min_bound_[1] - 1e-6 || occ.y() > max_bound_[1] + 1e-6 ||
-        node_z < min_bound_[2] - 1e-6 || node_z > max_bound_[2] + 1e-6) { ++skipped_out_of_bounds; continue; }
-
-    // vertical clearance check above the voxel top surface to determine walkability
-    bool vertical_clear = true;
-    double stepz = std::max(active_voxel_size_, 0.05);
-    double voxel_top = occ.z() + 0.5 * octree_->getNodeSize(it.getDepth());
-    for (double z = voxel_top + 0.01; z <= voxel_top + robot_height_; z += stepz) {
-      octomap::OcTreeNode* nn = octree_->search(occ.x(), occ.y(), z);
-      if (nn && octree_->isNodeOccupied(nn)) { vertical_clear = false; break; }
-    }
-    // Count but don't skip non-walkable nodes — they're included for visualization
-    bool stair_rescued = false;
-    if (!vertical_clear) {
-      // Stair-step rescue: if the blocker above is a valid stair tread,
-      // treat this node as walkable anyway
-      if (isStairStep(occ.x(), occ.y(), voxel_top, octree_->getNodeSize(it.getDepth()))) {
-        vertical_clear = true;
-        stair_rescued = true;
-      } else {
-        ++skipped_collision;
-      }
-    }
-
-    // Floor support check: verify the surface has enough horizontal extent
-    // (rejects thin wall tops that pass vertical clearance)
-    if (vertical_clear) {
-      double node_sz = octree_->getNodeSize(it.getDepth());
-      if (!hasFloorSupport(occ.x(), occ.y(), occ.z(), node_sz)) {
-        vertical_clear = false; // Mark as non-walkable (wall top / narrow ledge)
-      }
-    }
-
-    octomap::point3d center(occ.x(), occ.y(), node_z);
-    octomap::OcTreeKey key = octree_->coordToKey(center);
+        occ.z() < min_bound_[2] - 1e-6 || occ.z() > max_bound_[2] + 1e-6) continue;
     unsigned int depth = it.getDepth();
-    double size = octree_->getNodeSize(depth);
+    raw_voxels.push_back({occ, octree_->coordToKey(occ), depth, octree_->getNodeSize(depth)});
+  }
 
+  RCLCPP_INFO(node_->get_logger(),
+    "Graph build phase 1: collected %zu occupied voxels from %zu leafs", raw_voxels.size(), total_leafs);
+
+  // --- Phase 2 (multi-threaded): Expensive per-voxel walkability checks ---
+  // Each thread writes to its own slot in the results vector — no contention.
+  struct VoxelResult {
+    std::string id;
     GraphNode gn;
-    gn.key = key;
-    gn.depth = depth;
-    gn.center = center;
-    gn.size = size;
-    gn.is_walkable = vertical_clear;  // floor = true, wall = false
-    gn.is_stair_step = stair_rescued;   // wider adjacency radius for stair treads
+    bool valid = false; // always true for occupied voxels (walkable or not)
+  };
+  std::vector<VoxelResult> voxel_results(raw_voxels.size());
+  std::atomic<size_t> skipped_collision{0};
 
-    // create stable id
-    char idbuf[128];
-    int ix_mm = static_cast<int>(std::round(center.x() * 1000.0));
-    int iy_mm = static_cast<int>(std::round(center.y() * 1000.0));
-    int iz_mm = static_cast<int>(std::round(center.z() * 1000.0));
-    std::snprintf(idbuf, sizeof(idbuf), "c_%d_%d_%d", ix_mm, iy_mm, iz_mm);
-    graph_nodes_.emplace(std::string(idbuf), gn);
+  // Thread helper (same logic as the penalty parallel_for)
+  auto graph_build_parallel = [&](size_t count, auto&& worker) {
+    if (count == 0) return;
+    unsigned int cap = 0U;
+    if (worker_thread_limit_ > 0) {
+      cap = static_cast<unsigned int>(worker_thread_limit_);
+    } else {
+      cap = std::thread::hardware_concurrency();
+      if (cap == 0U) cap = 2U;
+    }
+    unsigned int num_threads = std::max(1U, std::min(cap, static_cast<unsigned int>(count)));
+    RCLCPP_INFO(node_->get_logger(), "Graph build phase 2: using %u threads for %zu voxels", num_threads, count);
+    if (num_threads <= 1) {
+      worker(size_t(0), count);
+    } else {
+      size_t chunk = (count + num_threads - 1) / num_threads;
+      std::vector<std::thread> threads;
+      threads.reserve(num_threads);
+      for (unsigned int t = 0; t < num_threads; ++t) {
+        size_t s = t * chunk;
+        if (s >= count) break;
+        size_t e = std::min(s + chunk, count);
+        threads.emplace_back(worker, s, e);
+      }
+      for (auto &th : threads) { if (th.joinable()) th.join(); }
+    }
+  };
+
+  graph_build_parallel(raw_voxels.size(), [&](size_t v_start, size_t v_end) {
+    for (size_t vi = v_start; vi < v_end; ++vi) {
+      const auto &rv = raw_voxels[vi];
+      const octomap::point3d &occ = rv.coord;
+      double node_z = occ.z();
+
+      // vertical clearance check above the voxel top surface to determine walkability
+      bool vertical_clear = true;
+      double stepz = std::max(active_voxel_size_, 0.05);
+      double voxel_top = occ.z() + 0.5 * rv.node_size;
+      for (double z = voxel_top + 0.01; z <= voxel_top + robot_height_; z += stepz) {
+        octomap::OcTreeNode* nn = octree_->search(occ.x(), occ.y(), z);
+        if (nn && octree_->isNodeOccupied(nn)) { vertical_clear = false; break; }
+      }
+
+      // Count but don't skip non-walkable nodes — they're included for visualization
+      bool stair_rescued = false;
+      if (!vertical_clear) {
+        // Stair-step rescue: if the blocker above is a valid stair tread,
+        // treat this node as walkable anyway
+        if (isStairStep(occ.x(), occ.y(), voxel_top, rv.node_size)) {
+          vertical_clear = true;
+          stair_rescued = true;
+        } else {
+          ++skipped_collision;
+        }
+      }
+
+      // Floor support check: verify the surface has enough horizontal extent
+      // (rejects thin wall tops that pass vertical clearance)
+      if (vertical_clear) {
+        if (!hasFloorSupport(occ.x(), occ.y(), occ.z(), rv.node_size)) {
+          vertical_clear = false; // Mark as non-walkable (wall top / narrow ledge)
+        }
+      }
+
+      octomap::point3d center(occ.x(), occ.y(), node_z);
+
+      GraphNode gn;
+      gn.key = rv.key;
+      gn.depth = rv.depth;
+      gn.center = center;
+      gn.size = rv.node_size;
+      gn.is_walkable = vertical_clear;
+      gn.is_stair_step = stair_rescued;
+
+      // create stable id
+      char idbuf[128];
+      int ix_mm = static_cast<int>(std::round(center.x() * 1000.0));
+      int iy_mm = static_cast<int>(std::round(center.y() * 1000.0));
+      int iz_mm = static_cast<int>(std::round(center.z() * 1000.0));
+      std::snprintf(idbuf, sizeof(idbuf), "c_%d_%d_%d", ix_mm, iy_mm, iz_mm);
+
+      voxel_results[vi].id = std::string(idbuf);
+      voxel_results[vi].gn = gn;
+      voxel_results[vi].valid = true;
+    }
+  });
+
+  // --- Phase 3 (single-threaded): Insert results into graph_nodes_ map ---
+  size_t inserted = 0;
+  for (const auto &vr : voxel_results) {
+    if (!vr.valid) continue;
+    graph_nodes_.emplace(vr.id, vr.gn);
     ++inserted;
   }
+  std::atomic<size_t> rejected_distance{0};
+  std::atomic<size_t> rejected_los{0};
 
   // Count stair-step nodes for diagnostics
   size_t stair_step_count = 0;
@@ -981,10 +1038,8 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
     node_snapshot.emplace_back(kv.first, kv.second);
   }
 
-  const size_t min_batch = 128;
   auto pick_thread_count = [&](size_t workload) -> unsigned int {
     if (workload == 0) return 0U;
-    if (workload < min_batch) return 1U;
     unsigned int cap = 0U;
     if (worker_thread_limit_ > 0) {
       cap = static_cast<unsigned int>(worker_thread_limit_);
