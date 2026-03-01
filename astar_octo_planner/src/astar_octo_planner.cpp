@@ -229,153 +229,177 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
         const int search_cells = static_cast<int>(std::ceil(search_radius / cell_size)) + 1;
 
         size_t penalized_count = 0;
-        size_t edge_count = 0;
-        double max_shift_seen = 0.0;
+        std::atomic<size_t> edge_count{0};
+
+        // Thread helper: runs worker(start, end) in parallel across [0, count)
+        auto parallel_for = [&](size_t count, auto&& worker) {
+          if (count == 0) return;
+          unsigned int cap = 0U;
+          if (worker_thread_limit_ > 0) {
+            cap = static_cast<unsigned int>(worker_thread_limit_);
+          } else {
+            cap = std::thread::hardware_concurrency();
+            if (cap == 0U) cap = 2U;
+          }
+          unsigned int num_threads = std::max(1U, std::min(cap, static_cast<unsigned int>(count)));
+          if (num_threads <= 1) {
+            worker(size_t(0), count);
+          } else {
+            size_t chunk = (count + num_threads - 1) / num_threads;
+            std::vector<std::thread> threads;
+            threads.reserve(num_threads);
+            for (unsigned int t = 0; t < num_threads; ++t) {
+              size_t s = t * chunk;
+              if (s >= count) break;
+              size_t e = std::min(s + chunk, count);
+              threads.emplace_back(worker, s, e);
+            }
+            for (auto &th : threads) { if (th.joinable()) th.join(); }
+          }
+        };
 
         struct ShiftInfo { double shift_xy = 0.0; double shift_x = 0.0; double shift_y = 0.0; int n_neighbors = 0; };
         std::vector<ShiftInfo> shift_data(walkable_list.size());
 
-        for (size_t wi = 0; wi < walkable_list.size(); ++wi) {
-          const auto &w = walkable_list[wi];
-          int gx = static_cast<int>(std::floor(w.center.x() / cell_size));
-          int gy = static_cast<int>(std::floor(w.center.y() / cell_size));
+        // ---------- PART 1: Centroid-shift computation (threaded) ----------
+        parallel_for(walkable_list.size(), [&](size_t w_start, size_t w_end) {
+          for (size_t wi = w_start; wi < w_end; ++wi) {
+            const auto &w = walkable_list[wi];
+            int gx = static_cast<int>(std::floor(w.center.x() / cell_size));
+            int gy = static_cast<int>(std::floor(w.center.y() / cell_size));
 
-          double sum_x = 0.0, sum_y = 0.0;
-          int count = 0;
+            double sum_x = 0.0, sum_y = 0.0;
+            int count = 0;
 
-          for (int dgx = -search_cells; dgx <= search_cells; ++dgx) {
-            for (int dgy = -search_cells; dgy <= search_cells; ++dgy) {
-              auto it = walkable_grid.find({gx+dgx, gy+dgy});
-              if (it == walkable_grid.end()) continue;
-              for (size_t nidx : it->second) {
-                if (nidx == wi) continue;
-                const auto &nb = walkable_list[nidx];
-                if (std::abs(nb.z - w.z) > z_tol) continue; // same level only
-                double dx = nb.center.x() - w.center.x();
-                double dy = nb.center.y() - w.center.y();
-                double dist = std::sqrt(dx*dx + dy*dy);
-                if (dist <= search_radius) {
-                  sum_x += nb.center.x();
-                  sum_y += nb.center.y();
-                  ++count;
-                }
-              }
-            }
-          }
-
-          if (count >= 2) {
-            double cx = sum_x / count;
-            double cy = sum_y / count;
-            double sx = cx - w.center.x();
-            double sy = cy - w.center.y();
-            double shift = std::sqrt(sx*sx + sy*sy);
-            shift_data[wi] = {shift, sx, sy, count};
-            max_shift_seen = std::max(max_shift_seen, shift);
-          }
-        }
-
-        const double norm_factor = search_radius * 0.75;  // higher → less CS penalty on interior floor
-
-        // ---------- PART 2: Compute both penalties per node ----------
-        size_t graph_border_count = 0;
-        std::vector<double> cs_penalties(walkable_list.size(), 0.0);
-        std::vector<double> gb_penalties(walkable_list.size(), 0.0);
-
-        for (size_t wi = 0; wi < walkable_list.size(); ++wi) {
-          const auto &w = walkable_list[wi];
-          const auto &si = shift_data[wi];
-
-          // --- Centroid-shift penalty ---
-          double cs_penalty = 0.0;
-          if (si.n_neighbors >= 2 && si.shift_xy > 1e-6) {
-            double ratio = std::min(1.0, si.shift_xy / norm_factor);
-            cs_penalty = wall_penalty_weight_ * ratio * ratio;
-            if (ratio > 0.3) ++edge_count;
-
-            // Corner detection for centroid-shift
-            if (ratio > 0.2 && si.n_neighbors >= 4) {
-              int gx = static_cast<int>(std::floor(w.center.x() / cell_size));
-              int gy = static_cast<int>(std::floor(w.center.y() / cell_size));
-              double shift_angle = std::atan2(si.shift_y, si.shift_x);
-              int quadrant_mask = 0;
-              for (int dgx = -search_cells; dgx <= search_cells; ++dgx) {
-                for (int dgy = -search_cells; dgy <= search_cells; ++dgy) {
-                  auto it = walkable_grid.find({gx+dgx, gy+dgy});
-                  if (it == walkable_grid.end()) continue;
-                  for (size_t nidx : it->second) {
-                    if (nidx == wi) continue;
-                    const auto &nb = walkable_list[nidx];
-                    if (std::abs(nb.z - w.z) > z_tol) continue;
-                    double dx = nb.center.x() - w.center.x();
-                    double dy = nb.center.y() - w.center.y();
-                    if (dx*dx + dy*dy > search_radius * search_radius) continue;
-                    double angle = std::atan2(dy, dx) - shift_angle;
-                    while (angle > M_PI) angle -= 2.0 * M_PI;
-                    while (angle < -M_PI) angle += 2.0 * M_PI;
-                    int q;
-                    if (angle >= -M_PI/4 && angle < M_PI/4) q = 0;
-                    else if (angle >= M_PI/4 && angle < 3*M_PI/4) q = 1;
-                    else if (angle >= -3*M_PI/4 && angle < -M_PI/4) q = 3;
-                    else q = 2;
-                    quadrant_mask |= (1 << q);
+            for (int dgx = -search_cells; dgx <= search_cells; ++dgx) {
+              for (int dgy = -search_cells; dgy <= search_cells; ++dgy) {
+                auto it = walkable_grid.find({gx+dgx, gy+dgy});
+                if (it == walkable_grid.end()) continue;
+                for (size_t nidx : it->second) {
+                  if (nidx == wi) continue;
+                  const auto &nb = walkable_list[nidx];
+                  if (std::abs(nb.z - w.z) > z_tol) continue; // same level only
+                  double dx = nb.center.x() - w.center.x();
+                  double dy = nb.center.y() - w.center.y();
+                  double dist = std::sqrt(dx*dx + dy*dy);
+                  if (dist <= search_radius) {
+                    sum_x += nb.center.x();
+                    sum_y += nb.center.y();
+                    ++count;
                   }
                 }
               }
-              int n_quadrants = __builtin_popcount(quadrant_mask);
-              if (n_quadrants <= 2 && ratio > 0.4) {
-                double corner_factor = (3.0 - n_quadrants) / 2.0;
-                cs_penalty += corner_penalty_weight_ * ratio * corner_factor;
-              }
+            }
+
+            if (count >= 2) {
+              double cx = sum_x / count;
+              double cy = sum_y / count;
+              double sx = cx - w.center.x();
+              double sy = cy - w.center.y();
+              double shift = std::sqrt(sx*sx + sy*sy);
+              shift_data[wi] = {shift, sx, sy, count};
             }
           }
+        });
 
-          // --- Graph-adjacency border penalty (handles ramps/cliffs) ---
-          // Check which XY octants have walkable graph neighbors.
-          // The graph adjacency was built by buildConnectivityGraph() which
-          // connects nodes across height changes on ramps — no z_tol issue.
-          double gb_penalty = 0.0;
-          {
-            auto adj_it = planning_graph->adj.find(w.id);
-            int octant_mask = 0;
-            int walkable_neighbor_count = 0;
+        const double norm_factor = search_radius * 0.75;  // higher → less CS penalty on interior floor
 
-            if (adj_it != planning_graph->adj.end()) {
-              for (const auto &nb_id : adj_it->second) {
-                auto nb_it = planning_graph->nodes.find(nb_id);
-                if (nb_it == planning_graph->nodes.end() || !nb_it->second.is_walkable) continue;
-                ++walkable_neighbor_count;
-                double dx = nb_it->second.center.x() - w.center.x();
-                double dy = nb_it->second.center.y() - w.center.y();
-                double angle = std::atan2(dy, dx);
-                // Map to octant 0-7
-                int octant = static_cast<int>(std::floor((angle + M_PI) / (M_PI / 4.0))) % 8;
-                octant_mask |= (1 << octant);
+        // ---------- PART 2: Compute both penalties per node (threaded) ----------
+        std::atomic<size_t> graph_border_count{0};
+        std::vector<double> cs_penalties(walkable_list.size(), 0.0);
+        std::vector<double> gb_penalties(walkable_list.size(), 0.0);
+
+        parallel_for(walkable_list.size(), [&](size_t w_start, size_t w_end) {
+          for (size_t wi = w_start; wi < w_end; ++wi) {
+            const auto &w = walkable_list[wi];
+            const auto &si = shift_data[wi];
+
+            // --- Centroid-shift penalty ---
+            double cs_penalty = 0.0;
+            if (si.n_neighbors >= 2 && si.shift_xy > 1e-6) {
+              double ratio = std::min(1.0, si.shift_xy / norm_factor);
+              cs_penalty = wall_penalty_weight_ * ratio * ratio;
+              if (ratio > 0.3) ++edge_count;
+
+              // Corner detection for centroid-shift
+              if (ratio > 0.2 && si.n_neighbors >= 4) {
+                int gx = static_cast<int>(std::floor(w.center.x() / cell_size));
+                int gy = static_cast<int>(std::floor(w.center.y() / cell_size));
+                double shift_angle = std::atan2(si.shift_y, si.shift_x);
+                int quadrant_mask = 0;
+                for (int dgx = -search_cells; dgx <= search_cells; ++dgx) {
+                  for (int dgy = -search_cells; dgy <= search_cells; ++dgy) {
+                    auto it = walkable_grid.find({gx+dgx, gy+dgy});
+                    if (it == walkable_grid.end()) continue;
+                    for (size_t nidx : it->second) {
+                      if (nidx == wi) continue;
+                      const auto &nb = walkable_list[nidx];
+                      if (std::abs(nb.z - w.z) > z_tol) continue;
+                      double dx = nb.center.x() - w.center.x();
+                      double dy = nb.center.y() - w.center.y();
+                      if (dx*dx + dy*dy > search_radius * search_radius) continue;
+                      double angle = std::atan2(dy, dx) - shift_angle;
+                      while (angle > M_PI) angle -= 2.0 * M_PI;
+                      while (angle < -M_PI) angle += 2.0 * M_PI;
+                      int q;
+                      if (angle >= -M_PI/4 && angle < M_PI/4) q = 0;
+                      else if (angle >= M_PI/4 && angle < 3*M_PI/4) q = 1;
+                      else if (angle >= -3*M_PI/4 && angle < -M_PI/4) q = 3;
+                      else q = 2;
+                      quadrant_mask |= (1 << q);
+                    }
+                  }
+                }
+                int n_quadrants = __builtin_popcount(quadrant_mask);
+                if (n_quadrants <= 2 && ratio > 0.4) {
+                  double corner_factor = (3.0 - n_quadrants) / 2.0;
+                  cs_penalty += corner_penalty_weight_ * ratio * corner_factor;
+                }
               }
             }
 
-            int covered_octants = __builtin_popcount(octant_mask);
-            // Full coverage = 8 octants → interior.
-            // Missing octants → border of walkable surface.
-            // This works on ramps because the graph connects across slopes.
-            if (covered_octants < 7 && walkable_neighbor_count >= 1) {
-              int missing = 8 - covered_octants;
-              double border_ratio = static_cast<double>(missing) / 8.0;
-              gb_penalty = wall_penalty_weight_ * border_ratio;
+            // --- Graph-adjacency border penalty (handles ramps/cliffs) ---
+            // Check which XY octants have walkable graph neighbors.
+            // The graph adjacency was built by buildConnectivityGraph() which
+            // connects nodes across height changes on ramps — no z_tol issue.
+            double gb_penalty = 0.0;
+            {
+              auto adj_it = planning_graph->adj.find(w.id);
+              int octant_mask = 0;
+              int walkable_neighbor_count = 0;
 
-              // Corner: many missing octants → exposed edge or corner
-              if (missing >= 4) {
-                gb_penalty += corner_penalty_weight_ * 0.5 * border_ratio;
+              if (adj_it != planning_graph->adj.end()) {
+                for (const auto &nb_id : adj_it->second) {
+                  auto nb_it = planning_graph->nodes.find(nb_id);
+                  if (nb_it == planning_graph->nodes.end() || !nb_it->second.is_walkable) continue;
+                  ++walkable_neighbor_count;
+                  double dx = nb_it->second.center.x() - w.center.x();
+                  double dy = nb_it->second.center.y() - w.center.y();
+                  double angle = std::atan2(dy, dx);
+                  // Map to octant 0-7
+                  int octant = static_cast<int>(std::floor((angle + M_PI) / (M_PI / 4.0))) % 8;
+                  octant_mask |= (1 << octant);
+                }
               }
-              ++graph_border_count;
-            } else if (walkable_neighbor_count == 0) {
-              // Isolated node → high penalty
-              gb_penalty = wall_penalty_weight_;
+
+              int covered_octants = __builtin_popcount(octant_mask);
+              if (covered_octants < 7 && walkable_neighbor_count >= 1) {
+                int missing = 8 - covered_octants;
+                double border_ratio = static_cast<double>(missing) / 8.0;
+                gb_penalty = wall_penalty_weight_ * border_ratio;
+                if (missing >= 4) {
+                  gb_penalty += corner_penalty_weight_ * 0.5 * border_ratio;
+                }
+                ++graph_border_count;
+              } else if (walkable_neighbor_count == 0) {
+                gb_penalty = wall_penalty_weight_;
+              }
             }
+
+            cs_penalties[wi] = cs_penalty;
+            gb_penalties[wi] = gb_penalty;
           }
-
-          cs_penalties[wi] = cs_penalty;
-          gb_penalties[wi] = gb_penalty;
-        }
+        });
 
         // ---------- PART 3: Spread graph-border penalty through graph edges ----------
         // Multi-source Dijkstra from border nodes; penalty decays linearly
@@ -457,7 +481,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
         double dur_pen = std::chrono::duration_cast<std::chrono::duration<double>>(t_pen_end - t_pen_start).count();
         RCLCPP_INFO(node_->get_logger(),
                     "Penalty: %.3f s, walkable=%zu, cs_edges=%zu, graph_borders=%zu, penalized=%zu (search_r=%.2fm)",
-                    dur_pen, walkable_list.size(), edge_count, graph_border_count, penalized_count, search_radius);
+                    dur_pen, walkable_list.size(), edge_count.load(), graph_border_count.load(), penalized_count, search_radius);
 
         // Publish penalty markers now that they're computed
         if (publish_graph_markers_ && graph_marker_pub_) {
@@ -659,32 +683,6 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           while (came_from.find(u) != came_from.end()) { partial_ids.push_back(u); u = came_from.at(u); }
           partial_ids.push_back(start_id);
           std::reverse(partial_ids.begin(), partial_ids.end());
-
-          // Publish partial path for visualization (so user sees where planner gets stuck)
-          nav_msgs::msg::Path partial_msg;
-          partial_msg.header.stamp = node_->now();
-          partial_msg.header.frame_id = path_frame;
-          for (const auto &pid : partial_ids) {
-            const auto &gn = local_nodes.at(pid);
-            geometry_msgs::msg::PoseStamped ps;
-            ps.header.frame_id = path_frame;
-            ps.header.stamp = now;
-            ps.pose.position.x = gn.center.x();
-            ps.pose.position.y = gn.center.y();
-            ps.pose.position.z = gn.center.z();
-            ps.pose.orientation.w = 1.0;
-            partial_msg.poses.push_back(ps);
-          }
-          path_pub_->publish(partial_msg);
-
-          // Publish lifted copy too
-          nav_msgs::msg::Path lifted_partial = partial_msg;
-          for (auto &p : lifted_partial.poses) { p.pose.position.z += 0.5; }
-          body_height_path_pub_->publish(lifted_partial);
-
-          RCLCPP_WARN(node_->get_logger(),
-            "Published partial path (%zu waypoints) to closest reachable node (%.3f m from goal)",
-            partial_ids.size(), closest_dist);
 
           // Use partial path as the plan so the robot at least moves toward the goal
           path_ids = partial_ids;
