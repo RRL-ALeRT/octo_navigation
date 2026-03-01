@@ -62,7 +62,7 @@ namespace astar_octo_planner
 // Legacy grid-based A* structures removed; planner uses graph-based A* (planOnGraph)
 
 AstarOctoPlanner::AstarOctoPlanner()
-: voxel_size_(0.1),  // double than that of octomap resolution
+: voxel_size_(0.1),  // default minimum voxel size; overridden by octree resolution at runtime
   z_threshold_(0.3)   // same as Z_THRESHOLD in Python
 {
   // Planner now relies on octomap as the authoritative map source.
@@ -685,6 +685,12 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           RCLCPP_WARN(node_->get_logger(),
             "Published partial path (%zu waypoints) to closest reachable node (%.3f m from goal)",
             partial_ids.size(), closest_dist);
+
+          // Use partial path as the plan so the robot at least moves toward the goal
+          path_ids = partial_ids;
+          RCLCPP_WARN(node_->get_logger(),
+            "Using partial path (%zu waypoints) as plan — no full path to goal available",
+            path_ids.size());
         }
 
         // --- Connected-component diagnostic ---
@@ -734,238 +740,8 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           }
         }
 
-        // --- Bridge planning: plan from each side toward the gap, stitch if close ---
-        // Strategy:
-        //  1) BFS from start to get its walkable component
-        //  2) A* from start → closest-to-goal node within start component
-        //  3) A* from goal  → closest-to-start node within goal component
-        //  4) Stitch the two paths only if the gap between endpoints ≤ max_bridge_dist_
-        std::unordered_set<std::string> start_walkable_component;
-        {
-          std::queue<std::string> bfs_q;
-          bfs_q.push(start_id);
-          start_walkable_component.insert(start_id);
-          while (!bfs_q.empty()) {
-            std::string u = bfs_q.front(); bfs_q.pop();
-            auto it_a = local_adj.find(u);
-            if (it_a == local_adj.end()) continue;
-            for (const auto &v : it_a->second) {
-              if (local_nodes.find(v) == local_nodes.end()) continue;
-              if (!local_nodes.at(v).is_walkable) continue;
-              if (start_walkable_component.insert(v).second) bfs_q.push(v);
-            }
-          }
-        }
-
-        RCLCPP_INFO(node_->get_logger(),
-          "Bridge search: start walkable BFS=%zu nodes (A* expanded=%zu), goal walkable BFS=%zu nodes",
-          start_walkable_component.size(), expanded_set.size(), goal_component.size());
-
-        // --- Path 1: A* from start → closest node to goal within start component ---
-        std::vector<std::string> path_start_to_edge;
-        std::string start_edge_id;
-        {
-          // Heuristic: straight-line distance to goal
-          auto h_to_goal = [&](const std::string &a) -> double {
-            auto it = local_nodes.find(a);
-            auto it2 = local_nodes.find(goal_id);
-            if (it == local_nodes.end() || it2 == local_nodes.end()) return 0.0;
-            return it->second.center.distance(it2->second.center);
-          };
-
-          std::unordered_map<std::string, double> gs1;
-          std::unordered_map<std::string, std::string> cf1;
-          std::priority_queue<PQItem, std::vector<PQItem>, PQCmp> oq1;
-
-          oq1.push({start_id, h_to_goal(start_id), 0.0});
-          gs1[start_id] = 0.0;
-
-          // Track the node closest to goal (by heuristic) among all expanded
-          double best_h = std::numeric_limits<double>::infinity();
-
-          while (!oq1.empty()) {
-            PQItem cur = oq1.top(); oq1.pop();
-            if (gs1.find(cur.id) != gs1.end() && cur.g > gs1.at(cur.id)) continue;
-            if (start_walkable_component.count(cur.id) == 0) continue;
-
-            double h = h_to_goal(cur.id);
-            if (h < best_h) {
-              best_h = h;
-              start_edge_id = cur.id;
-            }
-
-            auto it_a1 = local_adj.find(cur.id);
-            if (it_a1 == local_adj.end()) continue;
-            for (const auto &nb : it_a1->second) {
-              if (local_nodes.find(nb) == local_nodes.end()) continue;
-              if (!local_nodes.at(nb).is_walkable) continue;
-              if (start_walkable_component.count(nb) == 0) continue;
-              double mc = local_nodes.at(cur.id).center.distance(local_nodes.at(nb).center);
-              double pen = getPrecomputedPenalty(nb);
-              double tent = cur.g + mc + pen;
-              if (gs1.find(nb) == gs1.end() || tent < gs1[nb]) {
-                cf1[nb] = cur.id;
-                gs1[nb] = tent;
-                oq1.push({nb, tent + h_to_goal(nb), tent});
-              }
-            }
-          }
-
-          // Reconstruct path from start → start_edge_id
-          if (!start_edge_id.empty()) {
-            std::string u = start_edge_id;
-            while (cf1.find(u) != cf1.end()) { path_start_to_edge.push_back(u); u = cf1.at(u); }
-            path_start_to_edge.push_back(start_id);
-            std::reverse(path_start_to_edge.begin(), path_start_to_edge.end());
-          }
-        }
-
-        // --- Path 2: A* from goal → closest node to start within goal component ---
-        std::vector<std::string> path_goal_to_edge;
-        std::string goal_edge_id;
-        {
-          // Heuristic: straight-line distance to start
-          auto h_to_start = [&](const std::string &a) -> double {
-            auto it = local_nodes.find(a);
-            auto it2 = local_nodes.find(start_id);
-            if (it == local_nodes.end() || it2 == local_nodes.end()) return 0.0;
-            return it->second.center.distance(it2->second.center);
-          };
-
-          std::unordered_map<std::string, double> gs2;
-          std::unordered_map<std::string, std::string> cf2;
-          std::priority_queue<PQItem, std::vector<PQItem>, PQCmp> oq2;
-
-          oq2.push({goal_id, h_to_start(goal_id), 0.0});
-          gs2[goal_id] = 0.0;
-
-          double best_h = std::numeric_limits<double>::infinity();
-
-          while (!oq2.empty()) {
-            PQItem cur = oq2.top(); oq2.pop();
-            if (gs2.find(cur.id) != gs2.end() && cur.g > gs2.at(cur.id)) continue;
-            if (goal_component.count(cur.id) == 0) continue;
-
-            double h = h_to_start(cur.id);
-            if (h < best_h) {
-              best_h = h;
-              goal_edge_id = cur.id;
-            }
-
-            auto it_a2 = local_adj.find(cur.id);
-            if (it_a2 == local_adj.end()) continue;
-            for (const auto &nb : it_a2->second) {
-              if (local_nodes.find(nb) == local_nodes.end()) continue;
-              if (!local_nodes.at(nb).is_walkable) continue;
-              if (goal_component.count(nb) == 0) continue;
-              double mc = local_nodes.at(cur.id).center.distance(local_nodes.at(nb).center);
-              double pen = getPrecomputedPenalty(nb);
-              double tent = cur.g + mc + pen;
-              if (gs2.find(nb) == gs2.end() || tent < gs2[nb]) {
-                cf2[nb] = cur.id;
-                gs2[nb] = tent;
-                oq2.push({nb, tent + h_to_start(nb), tent});
-              }
-            }
-          }
-
-          // Reconstruct path from goal → goal_edge_id (we'll reverse later)
-          if (!goal_edge_id.empty()) {
-            std::string u = goal_edge_id;
-            while (cf2.find(u) != cf2.end()) { path_goal_to_edge.push_back(u); u = cf2.at(u); }
-            path_goal_to_edge.push_back(goal_id);
-            std::reverse(path_goal_to_edge.begin(), path_goal_to_edge.end());
-            // path_goal_to_edge is now: goal → ... → goal_edge_id
-            // We need it as: goal_edge_id → ... → goal (for stitching)
-            std::reverse(path_goal_to_edge.begin(), path_goal_to_edge.end());
-          }
-        }
-
-        // --- Check the gap and stitch ---
-        if (!path_start_to_edge.empty() && !path_goal_to_edge.empty()) {
-          const auto& se_node = local_nodes.at(start_edge_id);
-          const auto& ge_node = local_nodes.at(goal_edge_id);
-          double gap = se_node.center.distance(ge_node.center);
-
-          RCLCPP_INFO(node_->get_logger(),
-            "Bridge: start→edge=%zu nodes (edge=%s), goal→edge=%zu nodes (edge=%s), gap=%.3f m (max=%.3f m)",
-            path_start_to_edge.size(), start_edge_id.c_str(),
-            path_goal_to_edge.size(), goal_edge_id.c_str(),
-            gap, max_bridge_dist_);
-
-          if (gap <= max_bridge_dist_) {
-            // Stitch: path_start_to_edge + path_goal_to_edge (goal_edge→...→goal)
-            path_ids.clear();
-            for (const auto &pid : path_start_to_edge) path_ids.push_back(pid);
-            for (const auto &pid : path_goal_to_edge) path_ids.push_back(pid);
-            RCLCPP_INFO(node_->get_logger(),
-              "Bridge path stitched: %zu waypoints (gap %.3f m)", path_ids.size(), gap);
-          } else {
-            RCLCPP_WARN(node_->get_logger(),
-              "Bridge gap too large (%.3f m > %.3f m max) — not bridging", gap, max_bridge_dist_);
-          }
-        } else {
-          RCLCPP_WARN(node_->get_logger(),
-            "Bridge planning failed: start_path=%zu, goal_path=%zu",
-            path_start_to_edge.size(), path_goal_to_edge.size());
-        }
-
-        // If bridge planning succeeded, path_ids is non-empty and we fall through
-        // to the normal path conversion below. Otherwise try a relaxed A*.
-
-        // Relaxed A* fallback: if the start and goal are in the same walkable
-        // component (BFS-reachable without isEdgeCollisionFree), the disconnect
-        // is caused by overly-strict edge collision checks. Run A* using only
-        // walkable adjacency (no isEdgeCollisionFree) to find a path.
-        if (path_ids.empty() && start_walkable_component.count(goal_id) > 0) {
-          RCLCPP_WARN(node_->get_logger(),
-            "Components are identical (%zu walkable nodes). Running relaxed A* (no edge collision check)...",
-            start_walkable_component.size());
-
-          std::unordered_map<std::string, double> gs_relaxed;
-          std::unordered_map<std::string, std::string> cf_relaxed;
-          std::priority_queue<PQItem, std::vector<PQItem>, PQCmp> oq_relaxed;
-
-          oq_relaxed.push({start_id, heuristic_local(start_id), 0.0});
-          gs_relaxed[start_id] = 0.0;
-
-          while (!oq_relaxed.empty()) {
-            PQItem cur = oq_relaxed.top(); oq_relaxed.pop();
-            if (cur.id == goal_id) {
-              std::string u = goal_id;
-              while (cf_relaxed.find(u) != cf_relaxed.end()) {
-                path_ids.push_back(u); u = cf_relaxed.at(u);
-              }
-              path_ids.push_back(start_id);
-              std::reverse(path_ids.begin(), path_ids.end());
-              break;
-            }
-            if (gs_relaxed.find(cur.id) != gs_relaxed.end() && cur.g > gs_relaxed.at(cur.id)) continue;
-            auto it_a = local_adj.find(cur.id);
-            if (it_a == local_adj.end()) continue;
-            for (const auto &nb : it_a->second) {
-              if (local_nodes.find(nb) == local_nodes.end()) continue;
-              if (!local_nodes.at(nb).is_walkable) continue;
-              // NO isEdgeCollisionFree check — rely on walkable adjacency + penalties
-              double mc = local_nodes.at(cur.id).center.distance(local_nodes.at(nb).center);
-              double pen = getPrecomputedPenalty(nb);
-              double tent = cur.g + mc + pen;
-              if (gs_relaxed.find(nb) == gs_relaxed.end() || tent < gs_relaxed[nb]) {
-                cf_relaxed[nb] = cur.id;
-                gs_relaxed[nb] = tent;
-                oq_relaxed.push({nb, tent + heuristic_local(nb), tent});
-              }
-            }
-          }
-
-          if (!path_ids.empty()) {
-            RCLCPP_INFO(node_->get_logger(),
-              "Relaxed A* found path: %zu waypoints", path_ids.size());
-          } else {
-            RCLCPP_WARN(node_->get_logger(),
-              "Relaxed A* also failed to find path");
-          }
-        }
+        // Bridge planning and relaxed A* fallbacks disabled.
+        // The partial path (if found above) is used as the plan instead.
 
         if (path_ids.empty()) {
           message = "No path found on graph";
@@ -2343,6 +2119,7 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
   incremental_graph_build_ = node_->declare_parameter(name_ + ".incremental_graph_build", incremental_graph_build_);
 
   // Declare planner tuning parameters (can be changed at runtime)
+  voxel_size_ = node_->declare_parameter(name_ + ".voxel_size", voxel_size_);
   z_threshold_ = node_->declare_parameter(name_ + ".z_threshold", z_threshold_);
   robot_radius_ = node_->declare_parameter(name_ + ".robot_radius", robot_radius_);
   min_vertical_clearance_ = node_->declare_parameter(name_ + ".min_vertical_clearance", min_vertical_clearance_);
