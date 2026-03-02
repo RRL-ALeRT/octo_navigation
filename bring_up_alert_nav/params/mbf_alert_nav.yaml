@@ -4,7 +4,7 @@ move_base_flex:
     robot_frame: 'base_link'
     odom_topic: '/odometry'
 
-    use_sim_time: true
+    use_sim_time: false
     force_stop_at_goal: true
     force_stop_on_cancel: true
 
@@ -21,8 +21,8 @@ move_base_flex:
     octo_controller:
       type: 'octo_controller/OctoController'
       ang_vel_factor: 0.25
-      lin_vel_factor: 0.5
-      max_lin_velocity: 0.5
+      lin_vel_factor: 0.3
+      max_lin_velocity: 0.3
       max_ang_velocity: 0.25
 
     controller_patience: 2.0
@@ -30,5 +30,4 @@ move_base_flex:
     dist_tolerance: 0.3
     angle_tolerance: 6.0
     cmd_vel_ignored_tolerance: 15.0
-
     controller_frequency: 50.0
