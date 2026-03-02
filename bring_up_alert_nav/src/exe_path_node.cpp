@@ -1,6 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <std_srvs/srv/set_bool.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include "bring_up_alert_nav/srv/start_nav.hpp"
 #include <mbf_msgs/action/exe_path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -71,6 +72,12 @@ public:
       get_node_logging_interface(),      // NodeLogger
       get_node_waitables_interface(),    // NodeWaitables
       "move_base_flex/exe_path");
+
+    // ④ Cancel service   /exe_path/cancel_nav
+    cancel_srv_ = create_service<std_srvs::srv::Trigger>(
+      "/exe_path/cancel_nav",
+      std::bind(&ExePath::onCancel, this,
+                std::placeholders::_1, std::placeholders::_2));
 
     RCLCPP_INFO(get_logger(), "ExePath Node ready - waiting for goal_pose.");
   }
@@ -195,11 +202,14 @@ private:
 
     auto send_opts = rclcpp_action::Client<mbf_msgs::action::ExePath>::SendGoalOptions();
     send_opts.goal_response_callback =
-        [this](auto handle) {                                         // log after send
-          if(!handle)
-            RCLCPP_INFO(get_logger(), "Nav finished SUCCESS");
-          else
-            RCLCPP_WARN(get_logger(), "Nav finished with outcome");
+        [this](auto handle) {
+          if(!handle) {
+            RCLCPP_WARN(get_logger(), "ExePath goal rejected");
+            exe_path_goal_handle_ = nullptr;
+          } else {
+            RCLCPP_INFO(get_logger(), "ExePath goal accepted");
+            exe_path_goal_handle_ = handle;
+          }
         };
     auto send =
       exe_path_ac_->async_send_goal(goal, send_opts);
@@ -211,6 +221,26 @@ private:
   /* ---------- members ---------- */
   nav_msgs::msg::Path latest_path_;
   nav_msgs::msg::Path latest_path__smooth_;
+
+  // Cancel service
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr cancel_srv_;
+  rclcpp_action::ClientGoalHandle<mbf_msgs::action::ExePath>::SharedPtr exe_path_goal_handle_;
+
+  void onCancel(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
+                std::shared_ptr<std_srvs::srv::Trigger::Response> res)
+  {
+    if (!exe_path_goal_handle_) {
+      res->success = false;
+      res->message = "No active ExePath goal to cancel";
+      RCLCPP_WARN(get_logger(), "Cancel requested but no active goal");
+      return;
+    }
+    RCLCPP_INFO(get_logger(), "Cancelling ExePath goal...");
+    exe_path_ac_->async_cancel_goal(exe_path_goal_handle_);
+    exe_path_goal_handle_ = nullptr;
+    res->success = true;
+    res->message = "Cancel request sent";
+  }
 
   // 2D Goal pose
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr goal_sub_;

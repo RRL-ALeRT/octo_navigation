@@ -14,7 +14,7 @@ offset_tf_publisher:
       - Omni_Inspect_KRail_offset
       - KRail_Start_offset
       - KRail_End_offset
-    octomap_topic: /navigation/octomap_full
+    octomap_topic: /octomap_full
     marker_topic: /navigation/offset_tf_markers
     offset_distance: 0.5
     ray_max_range: 5.0
