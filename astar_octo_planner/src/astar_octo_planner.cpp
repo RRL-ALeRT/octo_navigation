@@ -131,13 +131,13 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   plan.clear();
   std::string path_frame = map_frame_.empty() ? start.header.frame_id : map_frame_;
   rclcpp::Time now = node_->now();
-    if (octree_) {
-      double clear_radius = robot_radius_ + footprint_margin_;
-      double z_bottom = start_in_map.pose.position.z; // a little below base
-      double z_top = start_in_map.pose.position.z + robot_height_ + 0.1;
-      clearOccupiedCylinderAround(start_in_map.pose.position, clear_radius, z_bottom, z_top);
-      RCLCPP_INFO(node_->get_logger(), "Cleared occupied voxels around start pose within radius %.3f m and z [%.3f..%.3f]", clear_radius, z_bottom, z_top);
-    }
+    // if (octree_) {
+    //   double clear_radius = robot_radius_ + footprint_margin_;
+    //   double z_bottom = start_in_map.pose.position.z+1.0; // a little below base
+    //   double z_top = start_in_map.pose.position.z + robot_height_ + 0.1;
+    //   clearOccupiedCylinderAround(start_in_map.pose.position, clear_radius, z_bottom, z_top);
+    //   RCLCPP_INFO(node_->get_logger(), "Cleared occupied voxels around start pose within radius %.3f m and z [%.3f..%.3f]", clear_radius, z_bottom, z_top);
+    // }
 
     // --- Clear stale debug markers from previous failed plans ---
     if (graph_marker_pub_) {
@@ -588,8 +588,10 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
       penalties_dirty_ = false;
     }
 
-    // Compute a start search point 0.55m in front of the robot (base_link forward)
-    // to avoid picking graph nodes under the robot body/legs as the start.
+    // Compute a start search point 0.55m in front of the robot (base_link forward),
+    // then raycast downward in the octree to find the first occupied voxel below.
+    // This avoids picking graph nodes under the robot body/legs as the start and
+    // ensures the start snaps to an actual surface voxel in the map.
     const auto &sq = start_in_map.pose.orientation;
     double siny_cosp = 2.0 * (sq.w * sq.z + sq.x * sq.y);
     double cosy_cosp = 1.0 - 2.0 * (sq.y * sq.y + sq.z * sq.z);
@@ -598,9 +600,39 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
     double start_search_x = start_world.x + forward_offset * std::cos(yaw);
     double start_search_y = start_world.y + forward_offset * std::sin(yaw);
     double start_search_z = start_world.z;
-    RCLCPP_INFO(node_->get_logger(),
-      "Start search point: (%.3f, %.3f, %.3f) [%.2fm ahead of robot, yaw=%.2f rad]",
-      start_search_x, start_search_y, start_search_z, forward_offset, yaw);
+
+    // Raycast downward from the forward-offset point to find the first occupied voxel
+    octomap::point3d ray_origin(start_search_x, start_search_y, start_search_z);
+    octomap::point3d ray_direction(0.0, 0.0, -1.0); // straight down
+    octomap::point3d ray_hit;
+    const double max_ray_range = 5.0; // max downward search distance in metres
+    bool ray_found = false;
+    if (octree_) {
+      ray_found = octree_->castRay(ray_origin, ray_direction, ray_hit,
+                                    /*ignoreUnknownCells=*/true, max_ray_range);
+    }
+    if (ray_found) {
+      // Snap the hit point to the voxel centre so it aligns with the graph nodes
+      octomap::OcTreeKey hit_key = octree_->coordToKey(ray_hit);
+      octomap::point3d hit_center = octree_->keyToCoord(hit_key);
+      start_search_x = hit_center.x();
+      start_search_y = hit_center.y();
+      start_search_z = hit_center.z();
+      RCLCPP_INFO(node_->get_logger(),
+        "Raycast hit occupied voxel at (%.3f, %.3f, %.3f) — using as start search point "
+        "[ray origin (%.3f, %.3f, %.3f), %.2fm ahead, yaw=%.2f rad]",
+        start_search_x, start_search_y, start_search_z,
+        ray_origin.x(), ray_origin.y(), ray_origin.z(), forward_offset, yaw);
+    } else {
+      // Fallback: no voxel found below — use the forward-offset point as before
+      RCLCPP_WARN(node_->get_logger(),
+        "Downward raycast found no occupied voxel (origin %.3f, %.3f, %.3f, range %.1fm). "
+        "Falling back to forward-offset point.",
+        ray_origin.x(), ray_origin.y(), ray_origin.z(), max_ray_range);
+      RCLCPP_INFO(node_->get_logger(),
+        "Start search point (fallback): (%.3f, %.3f, %.3f) [%.2fm ahead of robot, yaw=%.2f rad]",
+        start_search_x, start_search_y, start_search_z, forward_offset, yaw);
+    }
 
     // Find closest graph nodes to start search point and goal
     std::string start_id = findClosestGraphNode(octomap::point3d(start_search_x, start_search_y, start_search_z), planning_graph);
@@ -1747,11 +1779,13 @@ std::string AstarOctoPlanner::findClosestGraphNode(const octomap::point3d& p, co
     double dxy_sq = dx*dx + dy*dy;
     // Skip if too far in XY
     if (dxy_sq > xy_search_radius * xy_search_radius) continue;
-    // Skip if node is above the query point (robot legs are above floor)
+    // Skip if node is too far above the query point
     double node_z = kv.second.center.z();
     if (node_z > p.z() + max_z_above_query) continue;
-    // Score: prefer low z (floor), with small XY penalty
-    double score = node_z + 0.1 * std::sqrt(dxy_sq);
+    // Score: prefer nodes closest in z to the query point (raycast hit),
+    // with small XY penalty to break ties.
+    double dz = std::abs(node_z - p.z());
+    double score = dz + 0.1 * std::sqrt(dxy_sq);
     if (score < best) { best = score; best_id = kv.first; }
   }
 
