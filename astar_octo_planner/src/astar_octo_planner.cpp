@@ -133,20 +133,34 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   rclcpp::Time now = node_->now();
     if (octree_) {
       double clear_radius = robot_radius_ + footprint_margin_;
-      double z_bottom = start_in_map.pose.position.z - 0.1; // a little below base
+      double z_bottom = start_in_map.pose.position.z; // a little below base
       double z_top = start_in_map.pose.position.z + robot_height_ + 0.1;
       clearOccupiedCylinderAround(start_in_map.pose.position, clear_radius, z_bottom, z_top);
       RCLCPP_INFO(node_->get_logger(), "Cleared occupied voxels around start pose within radius %.3f m and z [%.3f..%.3f]", clear_radius, z_bottom, z_top);
     }
 
+    // --- Clear stale debug markers from previous failed plans ---
+    if (graph_marker_pub_) {
+      visualization_msgs::msg::MarkerArray clear_ma;
+      visualization_msgs::msg::Marker del;
+      del.header.frame_id = map_frame_.empty() ? "map" : map_frame_;
+      del.header.stamp = node_->now();
+      del.ns = "failed_expanded";
+      del.id = 0;
+      del.action = visualization_msgs::msg::Marker::DELETE;
+      clear_ma.markers.push_back(del);
+      graph_marker_pub_->publish(clear_ma);
+    }
+
     // --- Double-buffered graph access ---
-    // Get a reference to the active graph. This is a shared_ptr copy, so the
-    // graph remains valid for the duration of this planning call even if the
-    // background thread swaps in a new graph.
+    // Deep-copy the active graph so node clearing and penalty computation
+    // are local to this planning call and don't corrupt the shared graph.
     std::shared_ptr<GraphData> planning_graph;
     {
       std::lock_guard<std::mutex> lock(graph_mutex_);
-      planning_graph = active_graph_;
+      if (active_graph_) {
+        planning_graph = std::make_shared<GraphData>(*active_graph_);
+      }
     }
 
     // If no active graph exists yet, we must build one synchronously (first call only).
@@ -165,25 +179,56 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
         graph_penalized_nodes_ = new_graph->penalized_nodes;
         graph_dirty_ = false;
       }
-      planning_graph = new_graph;
+      planning_graph = std::make_shared<GraphData>(*new_graph);
       // Penalties will be computed on-demand below (incremental check)
       RCLCPP_INFO(node_->get_logger(), "Graph built: nodes=%zu", planning_graph->size());
-    } else if (graph_dirty_) {
+    } else if (graph_dirty_.load()) {
       // Graph is dirty but we have one to use. Log and proceed (background will update).
       RCLCPP_DEBUG(node_->get_logger(), "Graph is dirty but using existing graph (nodes=%zu). Background rebuild in progress.",
                    planning_graph->size());
     }
 
-    // --- On-demand penalty/costmap computation ---
-    // Always recompute all penalties from scratch so every node in the graph
-    // is guaranteed to have a penalty value in the costmap.
+    // --- On-demand incremental penalty/costmap computation ---
+    // The penalty data ("costmap") is cached inside the graph.  Only walkable
+    // nodes that are not yet in the cached costmap have their raw penalties
+    // (centroid-shift + graph-border) computed.  When penalty parameters
+    // change (penalties_dirty_), the cache is invalidated and a full
+    // recompute is triggered.  A* plans directly on this costmap.
     if (planning_graph && !planning_graph->nodes.empty()) {
-      planning_graph->node_penalty.clear();
-      planning_graph->penalized_nodes.clear();
+      bool force_full_recompute = penalties_dirty_.load();
+      if (force_full_recompute) {
+        // Invalidate the entire penalty cache — forces full recomputation
+        planning_graph->penalty_computed_nodes.clear();
+        planning_graph->node_cs_penalty.clear();
+        planning_graph->node_gb_penalty.clear();
+        planning_graph->node_penalty.clear();
+        planning_graph->penalized_nodes.clear();
+      }
+
+      // Collect walkable node IDs present in the graph but not yet in the cached costmap
+      std::unordered_set<std::string> nodes_to_compute;
+      for (const auto &kv : planning_graph->nodes) {
+        if (kv.second.is_walkable &&
+            planning_graph->penalty_computed_nodes.count(kv.first) == 0) {
+          nodes_to_compute.insert(kv.first);
+        }
+      }
+
+      if (nodes_to_compute.empty()) {
+        // ---- Cache hit: all walkable nodes already have penalties ----
+        RCLCPP_INFO(node_->get_logger(),
+                    "All %zu walkable nodes already have cached penalties — skipping penalty recomputation.",
+                    planning_graph->penalty_computed_nodes.size());
+        if (publish_graph_markers_ && graph_marker_pub_) {
+          publishGraphMarkers(planning_graph);
+        }
+      } else {
+      // ---- Cache miss: compute penalties for new nodes ----
 
       {
-        RCLCPP_INFO(node_->get_logger(), "Computing penalties for %zu nodes (full recompute)...",
-                    planning_graph->nodes.size());
+        RCLCPP_INFO(node_->get_logger(), "Computing penalties for %zu new nodes (%zu cached, %s)...",
+                    nodes_to_compute.size(), planning_graph->penalty_computed_nodes.size(),
+                    force_full_recompute ? "full recompute" : "incremental");
         auto t_pen_start = std::chrono::steady_clock::now();
 
         // ================================================================
@@ -221,6 +266,20 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           int gx = static_cast<int>(std::floor(kv.second.center.x() / cell_size));
           int gy = static_cast<int>(std::floor(kv.second.center.y() / cell_size));
           walkable_grid[{gx, gy}].push_back(idx);
+        }
+
+        // --- Per-node computation flag and cache initialization ---
+        // needs_compute[wi] is true for walkable nodes not yet in the cached
+        // costmap.  For cached nodes, their raw cs/gb values are loaded later
+        // so that the spread (Part 3) and final merge (Part 4) produce correct
+        // penalties across the entire graph.
+        std::vector<bool> needs_compute(walkable_list.size(), false);
+        size_t new_node_count = 0;
+        for (size_t wi = 0; wi < walkable_list.size(); ++wi) {
+          if (nodes_to_compute.count(walkable_list[wi].id)) {
+            needs_compute[wi] = true;
+            ++new_node_count;
+          }
         }
 
         // ---------- PART 1: Centroid-shift (flat floor + walls) ----------
@@ -261,9 +320,10 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
         struct ShiftInfo { double shift_xy = 0.0; double shift_x = 0.0; double shift_y = 0.0; int n_neighbors = 0; };
         std::vector<ShiftInfo> shift_data(walkable_list.size());
 
-        // ---------- PART 1: Centroid-shift computation (threaded) ----------
+        // ---------- PART 1: Centroid-shift computation (threaded, incremental) ----------
         parallel_for(walkable_list.size(), [&](size_t w_start, size_t w_end) {
           for (size_t wi = w_start; wi < w_end; ++wi) {
+            if (!needs_compute[wi]) continue;  // cached — skip centroid-shift
             const auto &w = walkable_list[wi];
             int gx = static_cast<int>(std::floor(w.center.x() / cell_size));
             int gy = static_cast<int>(std::floor(w.center.y() / cell_size));
@@ -304,13 +364,24 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
 
         const double norm_factor = search_radius * 0.75;  // higher → less CS penalty on interior floor
 
-        // ---------- PART 2: Compute both penalties per node (threaded) ----------
+        // ---------- PART 2: Compute both penalties per node (threaded, incremental) ----------
         std::atomic<size_t> graph_border_count{0};
         std::vector<double> cs_penalties(walkable_list.size(), 0.0);
         std::vector<double> gb_penalties(walkable_list.size(), 0.0);
 
+        // Load cached raw penalty values for nodes that don't need recomputation
+        for (size_t wi = 0; wi < walkable_list.size(); ++wi) {
+          if (!needs_compute[wi]) {
+            auto cs_it = planning_graph->node_cs_penalty.find(walkable_list[wi].id);
+            if (cs_it != planning_graph->node_cs_penalty.end()) cs_penalties[wi] = cs_it->second;
+            auto gb_it = planning_graph->node_gb_penalty.find(walkable_list[wi].id);
+            if (gb_it != planning_graph->node_gb_penalty.end()) gb_penalties[wi] = gb_it->second;
+          }
+        }
+
         parallel_for(walkable_list.size(), [&](size_t w_start, size_t w_end) {
           for (size_t wi = w_start; wi < w_end; ++wi) {
+            if (!needs_compute[wi]) continue;  // cached — use pre-loaded cs/gb values
             const auto &w = walkable_list[wi];
             const auto &si = shift_data[wi];
 
@@ -469,19 +540,20 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           }
         }
 
-        // Non-walkable nodes: max penalty (walls/obstacles are impassable)
-        for (const auto &kv : planning_graph->nodes) {
-          if (!kv.second.is_walkable) {
-            planning_graph->node_penalty[kv.first] = wall_penalty_weight_;
-            planning_graph->penalized_nodes.insert(kv.first);
+        // Update penalty cache: store raw cs/gb for newly computed nodes
+        for (size_t wi = 0; wi < walkable_list.size(); ++wi) {
+          if (needs_compute[wi]) {
+            planning_graph->node_cs_penalty[walkable_list[wi].id] = cs_penalties[wi];
+            planning_graph->node_gb_penalty[walkable_list[wi].id] = gb_penalties[wi];
+            planning_graph->penalty_computed_nodes.insert(walkable_list[wi].id);
           }
         }
 
         auto t_pen_end = std::chrono::steady_clock::now();
         double dur_pen = std::chrono::duration_cast<std::chrono::duration<double>>(t_pen_end - t_pen_start).count();
         RCLCPP_INFO(node_->get_logger(),
-                    "Penalty: %.3f s, walkable=%zu, cs_edges=%zu, graph_borders=%zu, penalized=%zu (search_r=%.2fm)",
-                    dur_pen, walkable_list.size(), edge_count.load(), graph_border_count.load(), penalized_count, search_radius);
+                    "Penalty: %.3f s, walkable=%zu, new=%zu, cs_edges=%zu, graph_borders=%zu, penalized=%zu (search_r=%.2fm)",
+                    dur_pen, walkable_list.size(), new_node_count, edge_count.load(), graph_border_count.load(), penalized_count, search_radius);
 
         // Publish penalty markers now that they're computed
         if (publish_graph_markers_ && graph_marker_pub_) {
@@ -489,11 +561,49 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
         }
       }  // end penalty computation block
 
+      }  // end else (new nodes needed penalty computation)
+
+      // Non-walkable nodes: always assign max penalty (handles newly added non-walkable nodes)
+      for (const auto &kv : planning_graph->nodes) {
+        if (!kv.second.is_walkable) {
+          planning_graph->node_penalty[kv.first] = wall_penalty_weight_;
+          planning_graph->penalized_nodes.insert(kv.first);
+        }
+      }
+
+      // Persist the updated penalty costmap back to the active graph for caching.
+      // Subsequent planning calls will find these cached penalties and skip
+      // recomputation for nodes that haven't changed.
+      {
+        std::lock_guard<std::mutex> lock(graph_mutex_);
+        if (active_graph_) {
+          active_graph_->node_penalty = planning_graph->node_penalty;
+          active_graph_->penalized_nodes = planning_graph->penalized_nodes;
+          active_graph_->node_cs_penalty = planning_graph->node_cs_penalty;
+          active_graph_->node_gb_penalty = planning_graph->node_gb_penalty;
+          active_graph_->penalty_computed_nodes = planning_graph->penalty_computed_nodes;
+        }
+      }
+
       penalties_dirty_ = false;
     }
 
-    // Find closest graph nodes to start and goal using the planning_graph
-    std::string start_id = findClosestGraphNode(octomap::point3d(start_world.x, start_world.y, start_world.z), planning_graph);
+    // Compute a start search point 0.55m in front of the robot (base_link forward)
+    // to avoid picking graph nodes under the robot body/legs as the start.
+    const auto &sq = start_in_map.pose.orientation;
+    double siny_cosp = 2.0 * (sq.w * sq.z + sq.x * sq.y);
+    double cosy_cosp = 1.0 - 2.0 * (sq.y * sq.y + sq.z * sq.z);
+    double yaw = std::atan2(siny_cosp, cosy_cosp);
+    const double forward_offset = 0.55;
+    double start_search_x = start_world.x + forward_offset * std::cos(yaw);
+    double start_search_y = start_world.y + forward_offset * std::sin(yaw);
+    double start_search_z = start_world.z;
+    RCLCPP_INFO(node_->get_logger(),
+      "Start search point: (%.3f, %.3f, %.3f) [%.2fm ahead of robot, yaw=%.2f rad]",
+      start_search_x, start_search_y, start_search_z, forward_offset, yaw);
+
+    // Find closest graph nodes to start search point and goal
+    std::string start_id = findClosestGraphNode(octomap::point3d(start_search_x, start_search_y, start_search_z), planning_graph);
     std::string goal_id  = findClosestGraphNode(octomap::point3d(goal_world.x,  goal_world.y,  goal_world.z), planning_graph);
 
     // Validate start node has walkable neighbors — if not, re-snap to a connected node
@@ -651,100 +761,39 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           RCLCPP_INFO(node_->get_logger(), "A* search took %.3f s, expanded=%zu nodes", dur_astar, expanded_set.size());
 
       if (path_ids.empty()) {
-        RCLCPP_WARN(node_->get_logger(), "No full path found on graph between %s and %s", start_id.c_str(), goal_id.c_str());
+        RCLCPP_WARN(node_->get_logger(), "No path found on graph between %s and %s", start_id.c_str(), goal_id.c_str());
 
-        // --- Build partial path to the expanded node closest to the goal ---
-        // This lets the user see exactly where the planner gets stuck.
-        std::string closest_to_goal_id;
-        double closest_dist = std::numeric_limits<double>::infinity();
-        const auto& goal_node = local_nodes.at(goal_id);
-        for (const auto& nid : expanded_set) {
-          auto it_n = local_nodes.find(nid);
-          if (it_n == local_nodes.end()) continue;
-          double dx = it_n->second.center.x() - goal_node.center.x();
-          double dy = it_n->second.center.y() - goal_node.center.y();
-          double dz = it_n->second.center.z() - goal_node.center.z();
-          double d = dx*dx + dy*dy + dz*dz;
-          if (d < closest_dist) { closest_dist = d; closest_to_goal_id = nid; }
-        }
-
-        if (!closest_to_goal_id.empty()) {
-          closest_dist = std::sqrt(closest_dist);
-          const auto& closest_node = local_nodes.at(closest_to_goal_id);
-          RCLCPP_WARN(node_->get_logger(),
-            "Partial path: closest expanded node to goal is %s (%.3f, %.3f, %.3f), dist=%.3f m",
-            closest_to_goal_id.c_str(),
-            closest_node.center.x(), closest_node.center.y(), closest_node.center.z(),
-            closest_dist);
-
-          // Reconstruct partial path from start to closest-to-goal node
-          std::vector<std::string> partial_ids;
-          std::string u = closest_to_goal_id;
-          while (came_from.find(u) != came_from.end()) { partial_ids.push_back(u); u = came_from.at(u); }
-          partial_ids.push_back(start_id);
-          std::reverse(partial_ids.begin(), partial_ids.end());
-
-          // Use partial path as the plan so the robot at least moves toward the goal
-          path_ids = partial_ids;
-          RCLCPP_WARN(node_->get_logger(),
-            "Using partial path (%zu waypoints) as plan — no full path to goal available",
-            path_ids.size());
-        }
-
-        // --- Connected-component diagnostic ---
-        size_t start_component_size = expanded_set.size();
-
-        // BFS from goal (walkable nodes only) to find its component
-        std::unordered_set<std::string> goal_component;
-        {
-          std::queue<std::string> bfs_q;
-          bfs_q.push(goal_id);
-          goal_component.insert(goal_id);
-          while (!bfs_q.empty()) {
-            std::string u = bfs_q.front(); bfs_q.pop();
-            auto it_a = local_adj.find(u);
-            if (it_a == local_adj.end()) continue;
-            for (const auto &v : it_a->second) {
-              if (local_nodes.find(v) == local_nodes.end()) continue;
-              if (!local_nodes.at(v).is_walkable) continue; // Only walkable nodes
-              if (goal_component.insert(v).second) bfs_q.push(v);
-            }
+        // Publish expanded (dead-end) nodes as yellow markers for debugging
+        if (graph_marker_pub_ && !expanded_set.empty()) {
+          visualization_msgs::msg::MarkerArray debug_ma;
+          visualization_msgs::msg::Marker ym;
+          ym.header.frame_id = map_frame_.empty() ? "map" : map_frame_;
+          ym.header.stamp = node_->now();
+          ym.ns = "failed_expanded";
+          ym.id = 0;
+          ym.type = visualization_msgs::msg::Marker::CUBE_LIST;
+          ym.action = visualization_msgs::msg::Marker::ADD;
+          double ys = active_voxel_size_ > 0.0 ? std::max(active_voxel_size_ * 1.2, 0.06) : 0.06;
+          ym.scale.x = ys; ym.scale.y = ys; ym.scale.z = ys;
+          ym.color.r = 1.0f; ym.color.g = 1.0f; ym.color.b = 0.0f; ym.color.a = 1.0f;
+          for (const auto &nid : expanded_set) {
+            auto it_n = local_nodes.find(nid);
+            if (it_n == local_nodes.end()) continue;
+            geometry_msgs::msg::Point pt;
+            pt.x = it_n->second.center.x();
+            pt.y = it_n->second.center.y();
+            pt.z = it_n->second.center.z();
+            ym.points.push_back(pt);
           }
+          debug_ma.markers.push_back(ym);
+          graph_marker_pub_->publish(debug_ma);
+          RCLCPP_WARN(node_->get_logger(),
+            "Published %zu expanded dead-end nodes as yellow markers (ns=failed_expanded)",
+            expanded_set.size());
         }
 
-        RCLCPP_WARN(node_->get_logger(),
-          "DISCONNECTED GRAPH DIAGNOSTIC:\n"
-          "  Total graph nodes: %zu\n"
-          "  Start component (A* reachable): %zu nodes\n"
-          "  Goal  component (walkable BFS): %zu nodes\n"
-          "  Goal in start component: %s",
-          local_nodes.size(),
-          start_component_size,
-          goal_component.size(),
-          (expanded_set.count(goal_id) > 0) ? "YES" : "NO");
-
-        // Log boundary nodes of start component (low neighbor count = edge of reachable area)
-        size_t boundary_logged = 0;
-        for (const auto &nid : expanded_set) {
-          if (boundary_logged >= 5) break;
-          auto it_a = local_adj.find(nid);
-          size_t adj_count = (it_a != local_adj.end()) ? it_a->second.size() : 0;
-          if (adj_count <= 3) {
-            const auto &nd = local_nodes.at(nid);
-            RCLCPP_WARN(node_->get_logger(),
-              "  Boundary node: %s (%.3f, %.3f, %.3f) adj=%zu",
-              nid.c_str(), nd.center.x(), nd.center.y(), nd.center.z(), adj_count);
-            ++boundary_logged;
-          }
-        }
-
-        // Bridge planning and relaxed A* fallbacks disabled.
-        // The partial path (if found above) is used as the plan instead.
-
-        if (path_ids.empty()) {
-          message = "No path found on graph";
-          return mbf_msgs::action::GetPath::Result::NO_PATH_FOUND;
-        }
+        message = "No path found on graph";
+        return mbf_msgs::action::GetPath::Result::NO_PATH_FOUND;
       }
 
       // Convert found path ids to PoseStamped
@@ -1721,6 +1770,10 @@ std::string AstarOctoPlanner::findClosestGraphNode(const octomap::point3d& p, co
   return best_id;
 }
 
+// DEPRECATED — This legacy helper runs A* on the raw graph_nodes_/graph_adj_
+// WITHOUT penalty-based costmap weighting.  The actual planner uses the inline
+// A* in makePlan(), which operates on the cached penalty costmap
+// (planning_graph->node_penalty).  Kept for reference only.
 std::vector<std::string> AstarOctoPlanner::planOnGraph(const std::string& start_id, const std::string& goal_id) const
 {
   std::vector<std::string> empty;
@@ -2263,6 +2316,9 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
         // Carry forward cached penalties so makePlan doesn't recompute them
         new_graph->node_penalty = current_graph->node_penalty;
         new_graph->penalized_nodes = current_graph->penalized_nodes;
+        new_graph->node_cs_penalty = current_graph->node_cs_penalty;
+        new_graph->node_gb_penalty = current_graph->node_gb_penalty;
+        new_graph->penalty_computed_nodes = current_graph->penalty_computed_nodes;
         new_graph->processed_occupied_keys = current_graph->processed_occupied_keys;
         new_graph->nodes_needing_adjacency_update = current_graph->nodes_needing_adjacency_update;
 

@@ -341,6 +341,13 @@ private:
     std::unordered_map<std::string, std::vector<std::string>> adj;
     std::unordered_map<std::string, double> node_penalty;
     std::unordered_set<std::string> penalized_nodes;
+    // Cached raw penalty components for incremental costmap updates.
+    // These are stored separately so only new nodes need cs/gb computation;
+    // the spread and final merge are re-run from these cached values.
+    std::unordered_map<std::string, double> node_cs_penalty;  // centroid-shift penalty per node
+    std::unordered_map<std::string, double> node_gb_penalty;  // graph-border penalty per node
+    // Nodes that have had their raw penalties (cs + gb) computed and cached
+    std::unordered_set<std::string> penalty_computed_nodes;
     // Incremental build tracking (only used during build, not during planning)
     std::unordered_set<std::string> processed_occupied_keys;
     std::unordered_set<std::string> nodes_needing_adjacency_update;
