@@ -2685,10 +2685,12 @@ rcl_interfaces::msg::SetParametersResult AstarOctoPlanner::reconfigureCallback(s
       }
     } else if (parameter.get_name() == name_ + ".penalty_spread_radius") {
       penalty_spread_radius_ = parameter.as_double();
-      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated penalty_spread_radius to " << penalty_spread_radius_);
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated penalty_spread_radius to %.2f (penalties will be recomputed on next plan)", penalty_spread_radius_);
     } else if (parameter.get_name() == name_ + ".penalty_spread_factor") {
       penalty_spread_factor_ = parameter.as_double();
-      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated penalty_spread_factor to " << penalty_spread_factor_);
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated penalty_spread_factor to %.2f (penalties will be recomputed on next plan)", penalty_spread_factor_);
     } else if (parameter.get_name() == name_ + ".worker_thread_limit") {
       int new_limit = parameter.as_int();
       if (new_limit < 0) {
