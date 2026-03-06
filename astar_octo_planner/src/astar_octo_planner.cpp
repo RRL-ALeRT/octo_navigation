@@ -774,9 +774,17 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
               // Skip non-walkable nodes (walls, narrow ledges) — never route through them
               if (!local_nodes.at(nb).is_walkable) continue;
               // Edge collision check: raycast between nodes at robot body height
-              // to prevent paths that cut through walls between two walkable floors
-              if (!isEdgeCollisionFree(local_nodes.at(cur.id).center, local_nodes.at(nb).center)) continue;
-              double move_cost = local_nodes.at(cur.id).center.distance(local_nodes.at(nb).center);
+              // to prevent paths that cut through walls between two walkable floors.
+              // Skip for step/stair transitions — consecutive treads are occupied
+              // voxels that would always trigger a false collision in the
+              // interpolated body-clearance check.
+              const auto &cur_node = local_nodes.at(cur.id);
+              const auto &nb_node  = local_nodes.at(nb);
+              double edge_dz = std::abs(cur_node.center.z() - nb_node.center.z());
+              bool step_edge = (cur_node.is_stair_step || nb_node.is_stair_step)
+                            || (edge_dz > active_voxel_size_ * 0.5);
+              if (!step_edge && !isEdgeCollisionFree(cur_node.center, nb_node.center)) continue;
+              double move_cost = cur_node.center.distance(nb_node.center);
               double penalty = getPrecomputedPenalty(nb);
               node_penalty[nb] = penalty;
               if (penalty > 1e-9) penalized_nodes.insert(nb);
@@ -1926,8 +1934,12 @@ bool AstarOctoPlanner::isStairStep(double x, double y, double voxel_top, double 
 {
   if (!octree_) return false;
 
-  const double min_rise = 0.10;  // minimum step rise
-  const double max_rise = 0.35;  // maximum step rise (slightly above OSHA 0.30 for tolerance)
+  // Use the configurable parameters instead of hardcoded values.
+  // max_step_height_ is the general step-up limit; stair_min/max_rise_ are
+  // the stair-specific thresholds. We pick the wider envelope so that both
+  // plain steps and stair treads are accepted.
+  const double min_rise = stair_min_rise_;
+  const double max_rise = std::max(stair_max_rise_, max_step_height_);
   const double step_z = std::max(active_voxel_size_, 0.05);
 
   // Find the first occupied voxel above voxel_top
@@ -2621,7 +2633,9 @@ rcl_interfaces::msg::SetParametersResult AstarOctoPlanner::reconfigureCallback(s
       RCLCPP_INFO_STREAM(node_->get_logger(), "Updated max_surface_distance to " << max_surface_distance_);
     } else if (parameter.get_name() == name_ + ".max_step_height") {
       max_step_height_ = parameter.as_double();
-      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated max_step_height to " << max_step_height_);
+      graph_dirty_ = true;
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated max_step_height to %.3f (graph will be rebuilt on next plan)", max_step_height_);
     } else if (parameter.get_name() == name_ + ".enable_stair_edges") {
       enable_stair_edges_ = parameter.as_bool();
       RCLCPP_INFO_STREAM(node_->get_logger(), "Updated enable_stair_edges to " << enable_stair_edges_);
@@ -2639,10 +2653,14 @@ rcl_interfaces::msg::SetParametersResult AstarOctoPlanner::reconfigureCallback(s
       RCLCPP_INFO_STREAM(node_->get_logger(), "Updated max_bridge_dist to " << max_bridge_dist_);
     } else if (parameter.get_name() == name_ + ".stair_min_rise") {
       stair_min_rise_ = parameter.as_double();
-      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated stair_min_rise to " << stair_min_rise_);
+      graph_dirty_ = true;
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated stair_min_rise to %.3f (graph will be rebuilt on next plan)", stair_min_rise_);
     } else if (parameter.get_name() == name_ + ".stair_max_rise") {
       stair_max_rise_ = parameter.as_double();
-      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated stair_max_rise to " << stair_max_rise_);
+      graph_dirty_ = true;
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated stair_max_rise to %.3f (graph will be rebuilt on next plan)", stair_max_rise_);
     } else if (parameter.get_name() == name_ + ".stair_max_xy_dist") {
       stair_max_xy_dist_ = parameter.as_double();
       RCLCPP_INFO_STREAM(node_->get_logger(), "Updated stair_max_xy_dist to " << stair_max_xy_dist_);
