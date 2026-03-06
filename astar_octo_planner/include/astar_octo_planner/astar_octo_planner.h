@@ -205,6 +205,11 @@ private:
   // injects direct edges between consecutive treads.
   void detectAndAugmentStairs();
 
+  // Live vertical clearance check: query the octree at a node's position to verify
+  // no occupied voxel exists within robot_height_ above the surface.
+  // Used only during A* expansion (does NOT modify the graph or penalties).
+  bool hasVerticalClearance(const octomap::point3d& center, double node_size) const;
+
   // Check that a straight-line edge between two 3D points is collision-free
   // at robot body heights (samples multiple Z slices between ground and robot_height_).
   bool isEdgeCollisionFree(const octomap::point3d& from, const octomap::point3d& to) const;
