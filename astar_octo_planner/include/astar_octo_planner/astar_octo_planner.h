@@ -265,7 +265,7 @@ private:
   double voxel_size_;
   double z_threshold_;
   // robot footprint and collision params (meters)
-  double robot_radius_ = 0.35;
+  double robot_radius_ = 0.1;
   double robot_width_ = 0.4;   // default width (m)
   double robot_length_ = 1.5;  // default length (m)
   double robot_height_ = 0.7;  // default height (m)
