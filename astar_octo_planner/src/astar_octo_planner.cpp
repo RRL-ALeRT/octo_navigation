@@ -188,6 +188,24 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
                    planning_graph->size());
     }
 
+    // --- Pre-penalty walkability revalidation ---
+    // Re-check all walkable nodes against the current octree to catch wall
+    // separations that incremental graph builds may have missed.  This runs
+    // the same hasVerticalClearance + hasFloorSupport checks used during the
+    // initial graph build, but with the complete (up-to-date) octree.
+    // detail_level controls how aggressively we search for wall/floor boundaries:
+    //   1=basic recheck, 2=also probe octree for nearby walls, 3=full penalty reset
+    if (planning_graph && !planning_graph->nodes.empty() && walkability_recheck_detail_ > 0) {
+      auto t_reval_start = std::chrono::steady_clock::now();
+      size_t reclassified = revalidateWalkability(planning_graph, walkability_recheck_passes_,
+                                                  walkability_recheck_detail_);
+      auto t_reval_end = std::chrono::steady_clock::now();
+      double dur_reval = std::chrono::duration_cast<std::chrono::duration<double>>(t_reval_end - t_reval_start).count();
+      RCLCPP_INFO(node_->get_logger(),
+        "Walkability revalidation: %.3f s, reclassified %zu nodes (passes=%d, detail=%d)",
+        dur_reval, reclassified, walkability_recheck_passes_, walkability_recheck_detail_);
+    }
+
     // --- On-demand incremental penalty/costmap computation ---
     // The penalty data ("costmap") is cached inside the graph.  Only walkable
     // nodes that are not yet in the cached costmap have their raw penalties
@@ -797,6 +815,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           // Rejection counters for debugging which collision check blocks the path
           size_t rejected_not_walkable = 0;
           size_t rejected_vertical_clearance = 0;
+          size_t rejected_radial_clearance = 0;
           size_t rejected_edge_collision = 0;
           size_t accepted_neighbors = 0;
           // A* loop
@@ -822,6 +841,13 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
               // robot_height_ above them (catches tunnels / low ceilings / holes in walls
               // that may have appeared since graph build)
               if (!hasVerticalClearance(local_nodes.at(nb).center, local_nodes.at(nb).size)) { ++rejected_vertical_clearance; continue; }
+              // Radial clearance: from the free space ABOVE the floor node, check
+              // that no occupied voxel exists within robot_radius_ at body height.
+              // This detects narrow passages and walls adjacent to the node.
+              if (enable_radial_clearance_ && !hasRadialClearanceAbove(local_nodes.at(nb).center, local_nodes.at(nb).size)) { ++rejected_radial_clearance; continue; }
+              // Edge collision: sample the straight line between current and neighbor
+              // at body-height Z-slices to ensure we don't cross through walls.
+              if (enable_edge_collision_check_ && !isEdgeCollisionFree(local_nodes.at(cur.id).center, local_nodes.at(nb).center)) { ++rejected_edge_collision; continue; }
               ++accepted_neighbors;
               const auto &cur_node = local_nodes.at(cur.id);
               const auto &nb_node  = local_nodes.at(nb);
@@ -841,20 +867,20 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
           double dur_astar = std::chrono::duration_cast<std::chrono::duration<double>>(t_astar_end - t_astar_start).count();
           RCLCPP_INFO(node_->get_logger(), "A* search took %.3f s, expanded=%zu nodes", dur_astar, expanded_set.size());
           RCLCPP_INFO(node_->get_logger(),
-            "A* neighbor stats: accepted=%zu, rejected_not_walkable=%zu, rejected_vertical_clearance=%zu, rejected_edge_collision=%zu",
-            accepted_neighbors, rejected_not_walkable, rejected_vertical_clearance, rejected_edge_collision);
+            "A* neighbor stats: accepted=%zu, rejected_not_walkable=%zu, rejected_vertical_clearance=%zu, rejected_radial_clearance=%zu, rejected_edge_collision=%zu",
+            accepted_neighbors, rejected_not_walkable, rejected_vertical_clearance, rejected_radial_clearance, rejected_edge_collision);
 
       if (path_ids.empty()) {
         RCLCPP_WARN(node_->get_logger(),
           "NO PATH FOUND between %s and %s | expanded=%zu | "
-          "accepted=%zu, rejected: walkable=%zu, vertical_clearance=%zu, edge_collision=%zu",
+          "accepted=%zu, rejected: walkable=%zu, vertical_clearance=%zu, radial_clearance=%zu, edge_collision=%zu",
           start_id.c_str(), goal_id.c_str(), expanded_set.size(),
-          accepted_neighbors, rejected_not_walkable, rejected_vertical_clearance, rejected_edge_collision);
-        if (rejected_vertical_clearance > 0 || rejected_edge_collision > 0) {
+          accepted_neighbors, rejected_not_walkable, rejected_vertical_clearance, rejected_radial_clearance, rejected_edge_collision);
+        if (rejected_vertical_clearance > 0 || rejected_radial_clearance > 0 || rejected_edge_collision > 0) {
           RCLCPP_WARN(node_->get_logger(),
-            "  -> Collision checks blocked %zu + %zu neighbors. "
-            "Try increasing robot_height (current=%.2f) or check octomap for false occupied voxels above walkable surfaces.",
-            rejected_vertical_clearance, rejected_edge_collision, robot_height_);
+            "  -> Collision checks blocked %zu + %zu + %zu neighbors. "
+            "Try adjusting robot_height (%.2f), robot_radius (%.2f), or check octomap for false occupied voxels.",
+            rejected_vertical_clearance, rejected_radial_clearance, rejected_edge_collision, robot_height_, robot_radius_);
         }
 
         // Publish expanded (dead-end) nodes as yellow markers for debugging
@@ -1102,10 +1128,12 @@ void AstarOctoPlanner::buildConnectivityGraph(double eps)
       double node_z = occ.z();
 
       // vertical clearance check above the voxel top surface to determine walkability
+      // Uses wall_proximity_height_ (not robot_height_) so walkability classification
+      // is independent of collision parameters.
       bool vertical_clear = true;
       double stepz = std::max(active_voxel_size_, 0.05);
       double voxel_top = occ.z() + 0.5 * rv.node_size;
-      for (double z = voxel_top + 0.01; z <= voxel_top + robot_height_; z += stepz) {
+      for (double z = voxel_top + 0.01; z <= voxel_top + wall_proximity_height_; z += stepz) {
         octomap::OcTreeNode* nn = octree_->search(occ.x(), occ.y(), z);
         if (nn && octree_->isNodeOccupied(nn)) { vertical_clear = false; break; }
       }
@@ -1419,10 +1447,12 @@ void AstarOctoPlanner::updateConnectivityGraphIncremental(double eps)
         node_z < min_bound_[2] - 1e-6 || node_z > max_bound_[2] + 1e-6) continue;
 
     // Vertical clearance check above voxel top surface
+    // Uses wall_proximity_height_ (not robot_height_) so walkability classification
+    // is independent of collision parameters.
     bool vertical_clear = true;
     double stepz = std::max(active_voxel_size_, 0.05);
     double voxel_top = occ.z() + 0.5 * node_size;
-    for (double z = voxel_top + 0.01; z <= voxel_top + robot_height_; z += stepz) {
+    for (double z = voxel_top + 0.01; z <= voxel_top + wall_proximity_height_; z += stepz) {
       octomap::OcTreeNode* nn = octree_->search(occ.x(), occ.y(), z);
       if (nn && octree_->isNodeOccupied(nn)) { vertical_clear = false; break; }
     }
@@ -1997,8 +2027,10 @@ bool AstarOctoPlanner::isStairStep(double x, double y, double voxel_top, double 
   const double step_z = std::max(active_voxel_size_, 0.05);
 
   // Find the first occupied voxel above voxel_top
+  // Uses wall_proximity_height_ (not robot_height_) so stair detection is
+  // independent of collision parameters.
   double blocker_z = -1.0;
-  for (double z = voxel_top + 0.01; z <= voxel_top + robot_height_; z += step_z) {
+  for (double z = voxel_top + 0.01; z <= voxel_top + wall_proximity_height_; z += step_z) {
     octomap::OcTreeNode* nn = octree_->search(x, y, z);
     if (nn && octree_->isNodeOccupied(nn)) {
       blocker_z = z;
@@ -2017,7 +2049,7 @@ bool AstarOctoPlanner::isStairStep(double x, double y, double voxel_top, double 
   // 3) Check there's clearance above the blocker for the robot to stand on it
   //    (at least min_vertical_clearance_ above the blocker's top)
   double blocker_top = blocker_z + 0.5 * active_voxel_size_;
-  double clearance_needed = std::max(min_vertical_clearance_, robot_height_ * 0.5);
+  double clearance_needed = std::max(min_vertical_clearance_, wall_proximity_height_ * 0.5);
   for (double z = blocker_top + 0.01; z <= blocker_top + clearance_needed; z += step_z) {
     octomap::OcTreeNode* nn = octree_->search(x, y, z);
     if (nn && octree_->isNodeOccupied(nn)) {
@@ -2175,21 +2207,231 @@ void AstarOctoPlanner::detectAndAugmentStairs()
 }
 
 // ---------------------------------------------------------------------------
-// Live vertical clearance check (used only during A* expansion)
-// Returns true if the column above the node center is free up to robot_height_.
-// Does NOT modify graph or penalties.
+// revalidateWalkability — re-check walkable nodes in the graph against the
+// latest octree state before penalty computation.
+//
+// detail_level controls thoroughness:
+//   0 — disabled (returns immediately)
+//   1 — basic: re-run hasVerticalClearance + hasFloorSupport for every walkable
+//       node. Nodes that fail are flipped to non-walkable.
+//   2 — wall proximity: in addition to level-1 checks, probe the octree in a
+//       ring around each (still-)walkable node at body heights to detect nearby
+//       occupied wall voxels. Nodes that have walls within wall_proximity_radius_
+//       get their penalty cache invalidated so centroid-shift / graph-border
+//       algorithms recompute with the complete current graph data.
+//   3 — full invalidation: everything from level 2, plus unconditionally
+//       invalidate the entire penalty cache so ALL walkable nodes get their
+//       penalties recomputed from scratch.
+//
+// max_passes: how many iterations of the level-1 reclassification to run
+// (stops early if a pass reclassifies zero nodes).
+//
+// Returns total nodes reclassified from walkable → non-walkable.
+// ---------------------------------------------------------------------------
+size_t AstarOctoPlanner::revalidateWalkability(std::shared_ptr<GraphData>& graph,
+                                               int max_passes,
+                                               int detail_level)
+{
+  if (!graph || !octree_ || detail_level <= 0) return 0;
+
+  size_t total_reclassified = 0;
+
+  // ---- Level 1+: walkability re-check passes ----
+  for (int pass = 0; pass < std::max(1, max_passes); ++pass) {
+    size_t reclassified_this_pass = 0;
+
+    for (auto &kv : graph->nodes) {
+      if (!kv.second.is_walkable) continue;  // already non-walkable
+
+      const octomap::point3d &center = kv.second.center;
+      double node_size = kv.second.size;
+
+      // Re-check vertical clearance against current octree state
+      // Uses wall_proximity_height_ (not robot_height_) so walkability is
+      // independent of collision parameters.
+      bool vc_ok = hasVerticalClearance(center, node_size, wall_proximity_height_);
+
+      // If vertical clearance still passes, also re-check floor support.
+      // (A wall top can pass vertical clearance but lack horizontal extent.)
+      bool fs_ok = true;
+      if (vc_ok) {
+        fs_ok = hasFloorSupport(center.x(), center.y(), center.z(), node_size);
+      }
+
+      if (!vc_ok || !fs_ok) {
+        kv.second.is_walkable = false;
+        ++reclassified_this_pass;
+
+        // Invalidate cached penalty entries for this node
+        graph->penalty_computed_nodes.erase(kv.first);
+        graph->node_cs_penalty.erase(kv.first);
+        graph->node_gb_penalty.erase(kv.first);
+        graph->node_penalty.erase(kv.first);
+        graph->penalized_nodes.erase(kv.first);
+      }
+    }
+
+    total_reclassified += reclassified_this_pass;
+
+    RCLCPP_INFO(node_->get_logger(),
+      "Walkability revalidation pass %d/%d (detail=%d): reclassified %zu nodes to non-walkable",
+      pass + 1, max_passes, detail_level, reclassified_this_pass);
+
+    if (reclassified_this_pass == 0) break;
+  }
+
+  // If any nodes were reclassified, invalidate all penalty caches so neighbors
+  // get their graph-border / centroid-shift penalties recomputed correctly.
+  if (total_reclassified > 0) {
+    graph->penalty_computed_nodes.clear();
+    graph->node_cs_penalty.clear();
+    graph->node_gb_penalty.clear();
+    graph->node_penalty.clear();
+    graph->penalized_nodes.clear();
+
+    RCLCPP_INFO(node_->get_logger(),
+      "Walkability revalidation: %zu nodes reclassified — full penalty cache invalidated",
+      total_reclassified);
+  }
+
+  // ---- Level 2+: wall-proximity octree probing ----
+  // For each walkable node, probe the octree at body heights in a ring around
+  // the node.  If any occupied voxel (i.e. wall) is found within the scan
+  // radius, invalidate that node's penalty cache entry so the centroid-shift
+  // and graph-border algorithms recompute it with the complete graph.
+  // This catches wall/floor boundaries that were missed during incremental
+  // graph building because the penalty was computed when only part of the map
+  // was available.
+  if (detail_level >= 2) {
+    const double scan_radius = wall_proximity_radius_;
+    const int num_dirs = std::max(4, wall_proximity_num_dirs_);
+    const int num_z    = std::max(1, wall_proximity_num_z_);
+    const double angle_step = 2.0 * M_PI / static_cast<double>(num_dirs);
+    size_t wall_adjacent_invalidated = 0;
+
+    for (auto &kv : graph->nodes) {
+      if (!kv.second.is_walkable) continue;
+      // Skip nodes whose penalties are already invalidated (no cached entry)
+      if (graph->penalty_computed_nodes.count(kv.first) == 0) continue;
+
+      const octomap::point3d &center = kv.second.center;
+      double voxel_top = center.z() + 0.5 * kv.second.size;
+      bool found_wall = false;
+
+      // Probe at multiple Z-slices from just above the surface up to
+      // wall_proximity_height_ (independent of robot_height_ which is
+      // only used for collision checks during A* expansion).
+      for (int iz = 0; iz < num_z && !found_wall; ++iz) {
+        double frac = num_z == 1 ? 0.5 : static_cast<double>(iz) / static_cast<double>(num_z - 1);
+        double z = voxel_top + 0.02 + frac * wall_proximity_height_;
+
+        for (int idir = 0; idir < num_dirs && !found_wall; ++idir) {
+          double angle = idir * angle_step;
+          double sx = center.x() + scan_radius * std::cos(angle);
+          double sy = center.y() + scan_radius * std::sin(angle);
+          octomap::OcTreeNode* nn = octree_->search(sx, sy, z);
+          if (nn && octree_->isNodeOccupied(nn)) {
+            found_wall = true;
+          }
+        }
+      }
+
+      if (found_wall) {
+        // Don't reclassify — this IS a floor node. Just invalidate its penalty
+        // cache so the dual-penalty algorithms recompute it with full map data.
+        graph->penalty_computed_nodes.erase(kv.first);
+        graph->node_cs_penalty.erase(kv.first);
+        graph->node_gb_penalty.erase(kv.first);
+        graph->node_penalty.erase(kv.first);
+        // (don't erase from penalized_nodes — the recompute will re-add it)
+        ++wall_adjacent_invalidated;
+      }
+    }
+
+    RCLCPP_INFO(node_->get_logger(),
+      "Walkability revalidation (detail=%d): wall-proximity scan invalidated %zu node penalty caches "
+      "(scan_radius=%.2fm, dirs=%d, z_slices=%d)",
+      detail_level, wall_adjacent_invalidated, scan_radius, num_dirs, num_z);
+  }
+
+  // ---- Level 3: brute-force full penalty cache invalidation ----
+  if (detail_level >= 3) {
+    size_t cached_before = graph->penalty_computed_nodes.size();
+    graph->penalty_computed_nodes.clear();
+    graph->node_cs_penalty.clear();
+    graph->node_gb_penalty.clear();
+    graph->node_penalty.clear();
+    graph->penalized_nodes.clear();
+
+    RCLCPP_INFO(node_->get_logger(),
+      "Walkability revalidation (detail=3): force-invalidated entire penalty cache (%zu entries)",
+      cached_before);
+  }
+
+  return total_reclassified;
+}
+
+// ---------------------------------------------------------------------------
+// Live vertical clearance check (collision variant — uses robot_height_)
+// Used during A* expansion to reject nodes the robot can't physically fit through.
 // ---------------------------------------------------------------------------
 bool AstarOctoPlanner::hasVerticalClearance(const octomap::point3d& center, double node_size) const
+{
+  return hasVerticalClearance(center, node_size, robot_height_);
+}
+
+// ---------------------------------------------------------------------------
+// Vertical clearance check with explicit height parameter.
+// Used by graph-build / walkability revalidation with wall_proximity_height_
+// so that walkability classification is independent of robot_height_.
+// ---------------------------------------------------------------------------
+bool AstarOctoPlanner::hasVerticalClearance(const octomap::point3d& center, double node_size, double check_height) const
 {
   if (!octree_) return true;  // no map → optimistically allow
 
   const double stepz = std::max(active_voxel_size_, 0.05);
   const double voxel_top = center.z() + 0.5 * node_size;
 
-  for (double z = voxel_top + 0.01; z <= voxel_top + robot_height_; z += stepz) {
+  for (double z = voxel_top + 0.01; z <= voxel_top + check_height; z += stepz) {
     octomap::OcTreeNode* nn = octree_->search(center.x(), center.y(), z);
     if (nn && octree_->isNodeOccupied(nn)) {
-      return false;  // occupied voxel within robot_height_ above this node
+      return false;
+    }
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Radial clearance check from free space above a walkable node.
+// The node sits on a floor surface; checking horizontally at floor level would
+// hit adjacent floor voxels.  Instead we step into the free column above the
+// surface and sample radially at robot_radius_ to detect walls / narrow gaps.
+// Returns true if the robot body fits horizontally at this location.
+// ---------------------------------------------------------------------------
+bool AstarOctoPlanner::hasRadialClearanceAbove(const octomap::point3d& center, double node_size) const
+{
+  if (!octree_) return true;
+  // Nothing to check when radius is zero or negative
+  if (robot_radius_ <= 0.0) return true;
+
+  const double voxel_top = center.z() + 0.5 * node_size;
+  const int num_dirs = std::max(4, radial_clearance_num_dirs_);
+  const int num_z   = std::max(1, radial_clearance_num_z_);
+  const double angle_step = 2.0 * M_PI / static_cast<double>(num_dirs);
+
+  // Sample Z-slices from just above the surface up to robot_height_
+  for (int iz = 0; iz < num_z; ++iz) {
+    double frac = num_z == 1 ? 0.5 : static_cast<double>(iz) / static_cast<double>(num_z - 1);
+    double z = voxel_top + 0.02 + frac * robot_height_;  // 0.02 offset to clear floor surface
+
+    for (int idir = 0; idir < num_dirs; ++idir) {
+      double angle = idir * angle_step;
+      double sx = center.x() + robot_radius_ * std::cos(angle);
+      double sy = center.y() + robot_radius_ * std::sin(angle);
+      octomap::OcTreeNode* nn = octree_->search(sx, sy, z);
+      if (nn && octree_->isNodeOccupied(nn)) {
+        return false;  // wall / obstacle within robot radius at body height
+      }
     }
   }
   return true;
@@ -2198,9 +2440,17 @@ bool AstarOctoPlanner::hasVerticalClearance(const octomap::point3d& center, doub
 // Edge collision check: sample points along the line from->to and at each sample
 // check multiple Z heights (from above surface up to robot_height_) for occupied voxels.
 // This prevents A* from connecting two walkable floor nodes across a wall.
+//
+// IMPORTANT: Graph node centers sit INSIDE occupied floor voxels. When
+// interpolating Z between two nodes at different heights the raw z may dip into
+// the floor slab of the higher node, causing false collision detections.
+// To avoid this we compute the *top* of the interpolated surface (center.z +
+// half voxel) and only check the free body column above that.
 bool AstarOctoPlanner::isEdgeCollisionFree(const octomap::point3d& from, const octomap::point3d& to) const
 {
   if (!octree_) return true;
+  // Nothing to check when robot body height is zero or negative
+  if (robot_height_ <= 0.0) return true;
 
   double dist = from.distance(to);
   if (dist < 1e-6) return true;
@@ -2209,23 +2459,28 @@ bool AstarOctoPlanner::isEdgeCollisionFree(const octomap::point3d& from, const o
   double step = std::max(active_voxel_size_ * 0.5, 0.05);
   int n_samples = std::max(2, static_cast<int>(std::ceil(dist / step)));
 
-  // We check the free space ABOVE the surface where the robot body would be.
-  // Surface nodes are occupied voxels, so start from above the voxel top.
   const double voxel_half = active_voxel_size_ * 0.5;
-  const double z_start_offset = voxel_half + 0.05;  // just above voxel top surface
+  // Minimum body-check height: always check at least one full voxel above surface
+  const double min_body_height = std::max(robot_height_, active_voxel_size_);
   const double z_step = std::max(active_voxel_size_, 0.1);
-  const int n_z = std::max(2, static_cast<int>(std::ceil(robot_height_ / z_step)));
+  const int n_z = std::max(2, static_cast<int>(std::ceil(min_body_height / z_step)));
+
+  // Compute the TOP of each endpoint's voxel (surface level) so interpolation
+  // stays on/above the surface rather than dipping into the floor.
+  const double from_top = from.z() + voxel_half;
+  const double to_top   = to.z()   + voxel_half;
 
   for (int i = 1; i < n_samples; ++i) {  // skip endpoints (they're already validated as walkable)
     double t = static_cast<double>(i) / static_cast<double>(n_samples);
     double sx = from.x() + t * (to.x() - from.x());
     double sy = from.y() + t * (to.y() - from.y());
-    double sz = from.z() + t * (to.z() - from.z());
+    // Interpolate the SURFACE top, not the center
+    double surface_z = from_top + t * (to_top - from_top);
 
-    // Check from above surface voxel top up to robot_height_
+    // Check body column: from just above surface up to robot_height_
     for (int iz = 0; iz <= n_z; ++iz) {
       double frac = static_cast<double>(iz) / static_cast<double>(n_z);
-      double check_z = sz + z_start_offset + frac * robot_height_;
+      double check_z = surface_z + 0.01 + frac * min_body_height;
       octomap::OcTreeNode* nn = octree_->search(sx, sy, check_z);
       if (nn && octree_->isNodeOccupied(nn)) {
         return false;  // Wall or obstacle in the way
@@ -2351,6 +2606,17 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
   robot_radius_ = node_->declare_parameter(name_ + ".robot_radius", robot_radius_);
   min_vertical_clearance_ = node_->declare_parameter(name_ + ".min_vertical_clearance", min_vertical_clearance_);
   max_vertical_clearance_ = node_->declare_parameter(name_ + ".max_vertical_clearance", max_vertical_clearance_);
+  // Radial / edge collision check parameters (runtime-tunable)
+  radial_clearance_num_dirs_ = node_->declare_parameter(name_ + ".radial_clearance_num_dirs", radial_clearance_num_dirs_);
+  radial_clearance_num_z_ = node_->declare_parameter(name_ + ".radial_clearance_num_z", radial_clearance_num_z_);
+  enable_radial_clearance_ = node_->declare_parameter(name_ + ".enable_radial_clearance", enable_radial_clearance_);
+  enable_edge_collision_check_ = node_->declare_parameter(name_ + ".enable_edge_collision_check", enable_edge_collision_check_);
+  walkability_recheck_passes_ = node_->declare_parameter(name_ + ".walkability_recheck_passes", walkability_recheck_passes_);
+  walkability_recheck_detail_ = node_->declare_parameter(name_ + ".walkability_recheck_detail", walkability_recheck_detail_);
+  wall_proximity_radius_ = node_->declare_parameter(name_ + ".wall_proximity_radius", wall_proximity_radius_);
+  wall_proximity_height_ = node_->declare_parameter(name_ + ".wall_proximity_height", wall_proximity_height_);
+  wall_proximity_num_dirs_ = node_->declare_parameter(name_ + ".wall_proximity_num_dirs", wall_proximity_num_dirs_);
+  wall_proximity_num_z_ = node_->declare_parameter(name_ + ".wall_proximity_num_z", wall_proximity_num_z_);
   // robot footprint params (runtime-tunable)
   robot_width_ = node_->declare_parameter(name_ + ".robot_width", robot_width_);
   robot_length_ = node_->declare_parameter(name_ + ".robot_length", robot_length_);
@@ -2674,6 +2940,42 @@ rcl_interfaces::msg::SetParametersResult AstarOctoPlanner::reconfigureCallback(s
     } else if (parameter.get_name() == name_ + ".robot_radius") {
       robot_radius_ = parameter.as_double();
       RCLCPP_INFO_STREAM(node_->get_logger(), "Updated robot_radius to " << robot_radius_);
+    } else if (parameter.get_name() == name_ + ".radial_clearance_num_dirs") {
+      radial_clearance_num_dirs_ = parameter.as_int();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated radial_clearance_num_dirs to " << radial_clearance_num_dirs_);
+    } else if (parameter.get_name() == name_ + ".radial_clearance_num_z") {
+      radial_clearance_num_z_ = parameter.as_int();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated radial_clearance_num_z to " << radial_clearance_num_z_);
+    } else if (parameter.get_name() == name_ + ".enable_radial_clearance") {
+      enable_radial_clearance_ = parameter.as_bool();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated enable_radial_clearance to " << enable_radial_clearance_);
+    } else if (parameter.get_name() == name_ + ".enable_edge_collision_check") {
+      enable_edge_collision_check_ = parameter.as_bool();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Updated enable_edge_collision_check to " << enable_edge_collision_check_);
+    } else if (parameter.get_name() == name_ + ".walkability_recheck_passes") {
+      walkability_recheck_passes_ = parameter.as_int();
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated walkability_recheck_passes to %d (penalties will be recomputed on next plan)", walkability_recheck_passes_);
+    } else if (parameter.get_name() == name_ + ".walkability_recheck_detail") {
+      walkability_recheck_detail_ = parameter.as_int();
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated walkability_recheck_detail to %d (penalties will be recomputed on next plan)", walkability_recheck_detail_);
+    } else if (parameter.get_name() == name_ + ".wall_proximity_radius") {
+      wall_proximity_radius_ = parameter.as_double();
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated wall_proximity_radius to %.2f (penalties will be recomputed on next plan)", wall_proximity_radius_);
+    } else if (parameter.get_name() == name_ + ".wall_proximity_height") {
+      wall_proximity_height_ = parameter.as_double();
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated wall_proximity_height to %.2f (penalties will be recomputed on next plan)", wall_proximity_height_);
+    } else if (parameter.get_name() == name_ + ".wall_proximity_num_dirs") {
+      wall_proximity_num_dirs_ = parameter.as_int();
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated wall_proximity_num_dirs to %d", wall_proximity_num_dirs_);
+    } else if (parameter.get_name() == name_ + ".wall_proximity_num_z") {
+      wall_proximity_num_z_ = parameter.as_int();
+      penalties_dirty_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Updated wall_proximity_num_z to %d", wall_proximity_num_z_);
     } else if (parameter.get_name() == name_ + ".robot_width") {
       robot_width_ = parameter.as_double();
       RCLCPP_INFO_STREAM(node_->get_logger(), "Updated robot_width to " << robot_width_);

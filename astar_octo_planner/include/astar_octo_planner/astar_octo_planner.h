@@ -207,8 +207,20 @@ private:
 
   // Live vertical clearance check: query the octree at a node's position to verify
   // no occupied voxel exists within robot_height_ above the surface.
-  // Used only during A* expansion (does NOT modify the graph or penalties).
+  // Used during A* expansion for collision checking (does NOT modify the graph).
   bool hasVerticalClearance(const octomap::point3d& center, double node_size) const;
+
+  // Overload with explicit check_height (meters above voxel top to scan).
+  // Used by graph-build and walkability revalidation with wall_proximity_height_
+  // so that walkability classification is independent of robot_height_.
+  bool hasVerticalClearance(const octomap::point3d& center, double node_size, double check_height) const;
+
+  // Check radial clearance from the free space ABOVE a walkable node.
+  // Samples directions around (center.x, center.y) at body-height Z-slices
+  // (just above the surface up to robot_height_) and rejects if any occupied
+  // voxel is found within robot_radius_.  This avoids false positives from
+  // checking at floor level where adjacent floor voxels would collide.
+  bool hasRadialClearanceAbove(const octomap::point3d& center, double node_size) const;
 
   // Check that a straight-line edge between two 3D points is collision-free
   // at robot body heights (samples multiple Z slices between ground and robot_height_).
@@ -263,6 +275,44 @@ private:
   int footprint_samples_y_ = 3;
   double min_vertical_clearance_ = -0.5;
   double max_vertical_clearance_ = 0.6;
+  // Number of angular directions sampled during radial clearance checks
+  int radial_clearance_num_dirs_ = 8;
+  // Number of Z-slices between floor surface and robot_height_ for radial checks
+  int radial_clearance_num_z_ = 3;
+  // Enable radial clearance check during A* expansion
+  bool enable_radial_clearance_ = true;
+  // Enable edge collision check during A* expansion
+  bool enable_edge_collision_check_ = true;
+  // Number of walkability re-validation passes to run on the full graph before
+  // penalty computation in makePlan.  This re-checks hasVerticalClearance +
+  // hasFloorSupport for every walkable node against the latest octree state,
+  // catching wall separations that incremental builds may have missed.
+  // 0 = disabled, 1+ = number of passes (stops early if no reclassifications).
+  int walkability_recheck_passes_ = 1;
+  // Detail level for walkability revalidation (controls how aggressively we
+  // detect wall/floor intersections that incremental builds may have missed):
+  //   0 = disabled (no revalidation at all, overrides passes)
+  //   1 = basic: re-run hasVerticalClearance + hasFloorSupport
+  //   2 = wall proximity: also probe octree around each walkable node at body
+  //       height to find nearby occupied voxels (walls). Nodes with walls within
+  //       wall_proximity_radius_ get their penalty cache invalidated so the
+  //       centroid-shift / graph-border algorithms recompute with full map data.
+  //   3 = full invalidation: invalidate the entire penalty cache, forcing a
+  //       complete recomputation of all penalties from scratch.
+  int walkability_recheck_detail_ = 1;
+  // Radius (meters) within which to probe for occupied wall voxels at body height
+  // during detail-level-2 revalidation.  Larger = catches walls further away but
+  // invalidates more penalty cache entries.  Only used when detail >= 2.
+  double wall_proximity_radius_ = 0.5;
+  // Height (meters) above the floor surface to scan for wall voxels during
+  // detail-level-2 revalidation.  Independent of robot_height_ (which is only
+  // used for collision checks).  Controls how tall a column above each walkable
+  // node is probed for nearby walls.  0.5–1.0m works well for typical indoor walls.
+  double wall_proximity_height_ = 0.7;
+  // Number of angular directions for the wall proximity scan (detail >= 2)
+  int wall_proximity_num_dirs_ = 16;
+  // Number of Z-slices for the wall proximity scan (detail >= 2)
+  int wall_proximity_num_z_ = 3;
   // Floor support: minimum fraction of ring directions that must have occupied
   // neighbors at similar Z for a node to be considered walkable (rejects wall tops)
   double min_floor_support_ratio_ = 0.4;
@@ -360,6 +410,13 @@ private:
     bool empty() const { return nodes.empty(); }
     size_t size() const { return nodes.size(); }
   };
+
+  // Re-validate walkability of all nodes in the graph against the current octree.
+  // Runs up to max_passes iterations; each pass re-checks hasVerticalClearance and
+  // hasFloorSupport for every currently-walkable node.  Nodes that fail are flipped
+  // to non-walkable and their penalty cache entries are invalidated.  Stops early if
+  // a pass produces no reclassifications.  Returns total number of nodes reclassified.
+  size_t revalidateWalkability(std::shared_ptr<GraphData>& graph, int max_passes, int detail_level);
 
   // Active graph: always available for planning (never null after first build)
   std::shared_ptr<GraphData> active_graph_;
