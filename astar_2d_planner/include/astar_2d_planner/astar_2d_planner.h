@@ -184,14 +184,19 @@ private:
     // publisher of per face vectorfield
     bool publish_face_vectors = false;
     // offset of maximum distance from goal position
-    double goal_dist_offset = 0.3;
+    double goal_dist_offset = 0.5;
     // defines the vertex cost limit with which it can be accessed
-    double cost_limit = 1.0;
+    double cost_limit = 0.95;
+    // Add these new parameters
+    double obstacle_inflation_radius = 0.3;
+    double inflation_decay_rate = 0.5;
   } config_;
   
   double map_resolution_{0.1};
   double origin_x_{0.0}, origin_y_{0.0};
   std::vector<std::vector<int8_t>> occ_grid_;
+  // Add the cost map member variable
+  std::vector<std::vector<double>> cost_map_;
   size_t width_{0}, height_{0};                // grid size
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
   
@@ -206,15 +211,17 @@ private:
   /* ==== Function ==== */
   inline std::pair<int,int> worldToGrid(double wx, double wy) const;
   inline std::array<double,2> gridToWorld(int gx, int gy) const;
+  // Add the createInflatedCostMap method declaration
+  void createInflatedCostMap();
   std::vector<std::pair<int,int>>
       astar(const std::pair<int,int>& start,
             const std::pair<int,int>& goal);
   void mapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
   void goalPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
-  rclcpp_action::Client<mbf_msgs::action::MoveBase>::SharedPtr      mbf_client_;
-  rclcpp_action::Client<mbf_msgs::action::GetPath>::SharedPtr      mbf_getpath_client_;
-  
+  rclcpp_action::Client<mbf_msgs::action::MoveBase>::SharedPtr mbf_client_;
+  rclcpp_action::Client<mbf_msgs::action::GetPath>::SharedPtr mbf_getpath_client_;
+
   // Utility functions of the 3D Planner.
   // // Callback for point cloud subscription.
   // void pointcloud2Callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);

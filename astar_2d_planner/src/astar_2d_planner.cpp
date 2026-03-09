@@ -101,6 +101,9 @@ uint32_t Astar2dPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
     return mbf_msgs::action::GetPath::Result::FAILURE;
   }
 
+  // 1.5) Create inflated cost map for obstacle avoidance
+  createInflatedCostMap();
+
   // 2) world → grid
   auto [sx, sy] = worldToGrid(start.pose.position.x, start.pose.position.y);
   auto [gx, gy] = worldToGrid(goal.pose.position.x,  goal.pose.position.y);
@@ -139,6 +142,7 @@ uint32_t Astar2dPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
   path_msg.poses  = plan;
   path_pub_->publish(path_msg);
   cost = static_cast<double>(plan.size());
+  return mbf_msgs::action::GetPath::Result::SUCCESS;
   RCLCPP_INFO_STREAM(node_->get_logger(), "Path found with length: " << cost << " steps");
   
   // 6) Do smooth path
@@ -187,7 +191,7 @@ uint32_t Astar2dPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
     RCLCPP_INFO_STREAM(node_->get_logger(), "Smooth Path found with length: " << cost << " steps");
   }
 
-  return mbf_msgs::action::GetPath::Result::SUCCESS;
+  // return mbf_msgs::action::GetPath::Result::SUCCESS;
 }
 
 //=============testing function for smooth path=================
@@ -305,6 +309,54 @@ inline std::array<double,2> Astar2dPlanner::gridToWorld(int gx, int gy) const
   return {wx, wy};
 }
 
+void Astar2dPlanner::createInflatedCostMap()
+{
+  // Initialize cost map with original occupancy values
+  cost_map_.assign(height_, std::vector<double>(width_, 0.0));
+  
+  int inflation_radius_cells = static_cast<int>(config_.obstacle_inflation_radius / map_resolution_) + 1;
+  
+  // First pass: identify obstacles and set high costs
+  for (size_t y = 0; y < height_; ++y) {
+    for (size_t x = 0; x < width_; ++x) {
+      if (occ_grid_[y][x] == 100) {  // Occupied cell
+        cost_map_[y][x] = 1.0;  // Maximum cost
+      } else if (occ_grid_[y][x] == -1) {  // Unknown cell
+        cost_map_[y][x] = 0.5;  // Medium cost for unknown areas
+      }
+    }
+  }
+  
+  // Second pass: inflate obstacles
+  std::vector<std::vector<double>> inflated_map = cost_map_;
+  
+  for (size_t y = 0; y < height_; ++y) {
+    for (size_t x = 0; x < width_; ++x) {
+      if (occ_grid_[y][x] == 100) {  // If this is an obstacle
+        // Inflate around this obstacle
+        for (int dy = -inflation_radius_cells; dy <= inflation_radius_cells; ++dy) {
+          for (int dx = -inflation_radius_cells; dx <= inflation_radius_cells; ++dx) { // Fix: was ++dy
+            int nx = static_cast<int>(x) + dx;
+            int ny = static_cast<int>(y) + dy;
+            
+            if (nx >= 0 && ny >= 0 && nx < static_cast<int>(width_) && ny < static_cast<int>(height_)) {
+              double distance = std::sqrt(dx*dx + dy*dy) * map_resolution_;
+              
+              if (distance <= config_.obstacle_inflation_radius) {
+                // Calculate inflated cost using exponential decay
+                double inflation_cost = std::exp(-config_.inflation_decay_rate * distance / config_.obstacle_inflation_radius);
+                inflated_map[ny][nx] = std::max(inflated_map[ny][nx], inflation_cost);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  cost_map_ = inflated_map;
+}
+
 std::vector<std::pair<int,int>> Astar2dPlanner::astar(
   const std::pair<int,int>& start,
   const std::pair<int,int>& goal)
@@ -348,11 +400,21 @@ std::vector<std::pair<int,int>> Astar2dPlanner::astar(
       int nx = cur.xy.first + dx, ny = cur.xy.second + dy;
       if(nx<0||ny<0||nx>=static_cast<int>(width_)||ny>=static_cast<int>(height_))
         continue;
-      if(occ_grid_[ny][nx] != 0)          // 100=occu, -1=unknown skip
-        continue;
-
+  
+      // Use inflated cost map for obstacle avoidance
+      if(occ_grid_[ny][nx] == 100) continue;  // Always avoid occupied cells
+      if(occ_grid_[ny][nx] == -1) continue;   // Skip unknown cells
+      
+      // Check inflated cost and apply cost limit
+      double cell_cost = cost_map_[ny][nx];
+      if(cell_cost > config_.cost_limit) continue;  // Avoid high-cost areas
+      
       auto tentative = std::pair<int,int>{nx, ny};
-      double tentative_g = cur.g + heuristic(cur.xy, tentative);
+      double movement_cost = heuristic(cur.xy, tentative);
+      // Apply higher penalty for cells closer to obstacles
+      double obstacle_penalty = cell_cost * 10.0;  // Scale penalty based on proximity to obstacles
+      double tentative_g = cur.g + movement_cost + obstacle_penalty;
+      
       auto key = hash(nx,ny);
       if(!gscore.count(key) || tentative_g < gscore[key]){
         gscore[key] = tentative_g;
@@ -430,6 +492,9 @@ void Astar2dPlanner::mapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr m
       occ_grid_[y][x] = msg->data[y * width_ + x];
     }
   }
+  
+  RCLCPP_DEBUG(node_->get_logger(), "Map received with resolution: %.3f, size: %zux%zu", 
+              map_resolution_, width_, height_);
 }
 
 bool Astar2dPlanner::cancel()
@@ -449,6 +514,11 @@ bool Astar2dPlanner::initialize(const std::string& plugin_name, const rclcpp::No
   config_.publish_vector_field = node_->declare_parameter(name_ + ".publish_vector_field", config_.publish_vector_field);
   config_.publish_face_vectors   = node_->declare_parameter(name_ + ".publish_face_vectors", config_.publish_face_vectors);
   config_.goal_dist_offset       = node_->declare_parameter(name_ + ".goal_dist_offset", config_.goal_dist_offset);
+  
+  // Add obstacle inflation parameters
+  config_.obstacle_inflation_radius = node_->declare_parameter(name_ + ".obstacle_inflation_radius", config_.obstacle_inflation_radius);
+  config_.inflation_decay_rate = node_->declare_parameter(name_ + ".inflation_decay_rate", config_.inflation_decay_rate);
+  
   {
     rcl_interfaces::msg::ParameterDescriptor descriptor;
     descriptor.description = "Defines the vertex cost limit with which it can be accessed.";
@@ -463,7 +533,7 @@ bool Astar2dPlanner::initialize(const std::string& plugin_name, const rclcpp::No
   path_pub_smooth_ = node_->create_publisher<nav_msgs::msg::Path>("~/path_smooth", rclcpp::QoS(1).transient_local());
 
   map_sub_ = node_->create_subscription<nav_msgs::msg::OccupancyGrid>(
-    "/mapUGV", rclcpp::QoS(1).transient_local().reliable().durability_volatile(),
+    "/projected_map_1m", rclcpp::QoS(1).transient_local().reliable().durability_volatile(),
     std::bind(&Astar2dPlanner::mapCallback, this, std::placeholders::_1));
 
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(
@@ -479,6 +549,12 @@ rcl_interfaces::msg::SetParametersResult Astar2dPlanner::reconfigureCallback(std
     if (parameter.get_name() == name_ + ".cost_limit") {
       config_.cost_limit = parameter.as_double();
       RCLCPP_INFO_STREAM(node_->get_logger(), "New cost limit parameter received via dynamic reconfigure.");
+    } else if (parameter.get_name() == name_ + ".obstacle_inflation_radius") {
+      config_.obstacle_inflation_radius = parameter.as_double();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "New obstacle inflation radius: " << config_.obstacle_inflation_radius);
+    } else if (parameter.get_name() == name_ + ".inflation_decay_rate") {
+      config_.inflation_decay_rate = parameter.as_double();
+      RCLCPP_INFO_STREAM(node_->get_logger(), "New inflation decay rate: " << config_.inflation_decay_rate);
     }
   }
   result.successful = true;
