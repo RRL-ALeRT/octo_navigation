@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>astar_octo_planner</name>
+  <version>0.0.0</version>
+  <description>TODO: Package description</description>
+  <maintainer email="skpawar1305@gmail.com">Shubham</maintainer>
+  <license>Apache-2.0</license>
+
+    <depend>rclcpp</depend>
+    <depend>mbf_octo_core</depend>
+    <depend>mbf_utility</depend>
+    <depend>mbf_msgs</depend>
+    <depend>pluginlib</depend>
+  <depend>octomap</depend>
+  <depend>octomap_msgs</depend>
+  <depend>nav_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
