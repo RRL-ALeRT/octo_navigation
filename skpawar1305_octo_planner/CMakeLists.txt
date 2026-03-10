@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(astar_octo_planner)
+project(skpawar1305_octo_planner)
 
 find_package(ament_cmake_ros REQUIRED)
 find_package(mbf_octo_core REQUIRED)

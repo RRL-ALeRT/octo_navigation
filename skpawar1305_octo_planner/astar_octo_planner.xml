@@ -1,5 +1,5 @@
-<library path="astar_octo_planner">
-    <class name="astar_octo_planner/AstarOctoPlanner"
+<library path="skpawar1305_octo_planner">
+    <class name="skpawar1305_octo_planner/AstarOctoPlanner"
            type="astar_octo_planner::AstarOctoPlanner"
            base_class_type="mbf_octo_core::OctoPlanner">
         <description>
