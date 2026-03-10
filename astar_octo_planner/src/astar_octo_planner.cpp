@@ -53,6 +53,11 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 PLUGINLIB_EXPORT_CLASS(astar_octo_planner::AstarOctoPlanner, mbf_octo_core::OctoPlanner);
 
@@ -70,7 +75,116 @@ AstarOctoPlanner::AstarOctoPlanner()
   min_bound_ = {0.0, 0.0, 0.0};
 }
 
-AstarOctoPlanner::~AstarOctoPlanner() {}
+AstarOctoPlanner::~AstarOctoPlanner()
+{
+  // Fallback: save maps if on_shutdown callback didn't fire (e.g. abnormal exit)
+  saveMapsOnShutdown();
+}
+
+void AstarOctoPlanner::saveMapsOnShutdown()
+{
+  // Atomic guard: only save once (on_shutdown + destructor may both call this)
+  bool expected = false;
+  if (!maps_saved_.compare_exchange_strong(expected, true)) {
+    return;  // already saved
+  }
+
+  try {
+    // Build timestamp string: YYYYMMDD_HHMMSS
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_buf{};
+    localtime_r(&now_t, &tm_buf);
+    std::ostringstream ts;
+    ts << std::put_time(&tm_buf, "%Y-%m-%d_%H-%M-%S");
+    std::string timestamp = ts.str();
+
+    // Ensure ~/alert_maps directory exists
+    const char* home = std::getenv("HOME");
+    if (!home) home = "/tmp";
+    std::filesystem::path save_dir = std::filesystem::path(home) / "alert_maps";
+    std::filesystem::create_directories(save_dir);
+
+    // --- Save octomap as .ot ---
+    if (octree_) {
+      std::filesystem::path ot_path = save_dir / ("octomap_" + timestamp + ".ot");
+      if (octree_->write(ot_path.string())) {
+        if (node_) {
+          RCLCPP_INFO(node_->get_logger(), "Saved octomap to %s", ot_path.c_str());
+        }
+      } else {
+        if (node_) {
+          RCLCPP_ERROR(node_->get_logger(), "Failed to save octomap to %s", ot_path.c_str());
+        }
+      }
+    } else {
+      if (node_) {
+        RCLCPP_WARN(node_->get_logger(), "No octomap available to save on shutdown.");
+      }
+    }
+
+    // --- Save graph nodes as .ply ---
+    // Use active_graph_ if available, fall back to legacy graph_nodes_
+    const std::unordered_map<std::string, GraphNode>* nodes_ptr = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(graph_mutex_);
+      if (active_graph_ && !active_graph_->nodes.empty()) {
+        nodes_ptr = &active_graph_->nodes;
+      }
+    }
+    if (!nodes_ptr && !graph_nodes_.empty()) {
+      nodes_ptr = &graph_nodes_;
+    }
+
+    if (nodes_ptr && !nodes_ptr->empty()) {
+      std::filesystem::path ply_path = save_dir / ("graph_" + timestamp + ".ply");
+      std::ofstream ply(ply_path.string());
+      if (ply.is_open()) {
+        size_t count = nodes_ptr->size();
+
+        // PLY header
+        ply << "ply\n";
+        ply << "format ascii 1.0\n";
+        ply << "element vertex " << count << "\n";
+        ply << "property float x\n";
+        ply << "property float y\n";
+        ply << "property float z\n";
+        ply << "property uchar red\n";
+        ply << "property uchar green\n";
+        ply << "property uchar blue\n";
+        ply << "end_header\n";
+
+        // Write vertices: green=walkable, yellow=stair, red=non-walkable
+        for (const auto& [id, gn] : *nodes_ptr) {
+          int r = 255, g = 0, b = 0;
+          if (gn.is_walkable && gn.is_stair_step) {
+            r = 255; g = 255; b = 0;
+          } else if (gn.is_walkable) {
+            r = 0;   g = 255; b = 0;
+          }
+          ply << gn.center.x() << " " << gn.center.y() << " " << gn.center.z()
+              << " " << r << " " << g << " " << b << "\n";
+        }
+        ply.close();
+        if (node_) {
+          RCLCPP_INFO(node_->get_logger(), "Saved graph nodes (%zu vertices) to %s", count, ply_path.c_str());
+        }
+      } else {
+        if (node_) {
+          RCLCPP_ERROR(node_->get_logger(), "Failed to open %s for writing.", ply_path.c_str());
+        }
+      }
+    } else {
+      if (node_) {
+        RCLCPP_WARN(node_->get_logger(), "No graph nodes available to save on shutdown.");
+      }
+    }
+  } catch (const std::exception& e) {
+    if (node_) {
+      RCLCPP_ERROR(node_->get_logger(), "Exception during shutdown save: %s", e.what());
+    }
+  }
+}
 
 uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
                                     const geometry_msgs::msg::PoseStamped& goal,
@@ -2747,6 +2861,14 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
       //RCLCPP_INFO(node_->get_logger(), "Background: graph swap complete, planning can use new graph immediately.");
     }
   );
+
+  // Register shutdown callback so maps are saved on Ctrl+C (SIGINT).
+  // rclcpp::on_shutdown fires before the process exits, unlike the destructor
+  // which may never run when a launch file is killed.
+  rclcpp::on_shutdown([this]() {
+    RCLCPP_INFO(node_->get_logger(), "Shutdown signal received – saving maps...");
+    saveMapsOnShutdown();
+  });
 
   return true;
 }

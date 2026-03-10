@@ -430,6 +430,12 @@ private:
   std::unordered_map<std::string, double> graph_node_penalty_;
   std::unordered_set<std::string> graph_penalized_nodes_;
 
+  // Save octomap (.ot) and graph nodes (.ply) to ~/alert_maps with timestamped names.
+  // Called from rclcpp::on_shutdown (Ctrl+C) and as fallback from the destructor.
+  // Thread-safe: uses maps_saved_ atomic guard to prevent double-saving.
+  void saveMapsOnShutdown();
+  std::atomic_bool maps_saved_{false}; // guard against double-save
+
   // Background graph builder members
   rclcpp::TimerBase::SharedPtr graph_build_timer_;
   std::atomic_bool graph_dirty_{false};
