@@ -115,7 +115,8 @@ private:
 
   std::vector<geometry_msgs::msg::PoseStamped> reconstructPath(
     const std::unordered_map<GridCell, GridCell, GridCellHash> & came_from,
-    GridCell goal_cell,
+    const std::unordered_map<GridCell, std::vector<octomap::point3d>, GridCellHash> & trav_cache,
+    GridCell current,
     const std::string & frame_id) const;
 
   // ── Octomap subscription ──────────────────────────────────────────────────
@@ -133,11 +134,13 @@ private:
   rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr traversable_cells_pub_;
 
   mutable std::mutex octree_mutex_;
-  std::unique_ptr<octomap::OcTree> octree_;
+  std::shared_ptr<octomap::OcTree> octree_;
 
   // ── Parameters ────────────────────────────────────────────────────────────
 
   std::string octomap_topic_{"octomap_binary"};
+  std::string path_topic_{"~/path"};
+  std::string map_frame_{"map"};
   double resolution_{0.1};   ///< Grid cell size (m); overridden by octree resolution.
   // ── Boston Dynamics Spot physical dimensions ─────────────────────────────
   // Body: 1.1 m (L) × 0.5 m (W) × 0.6 m standing height.
@@ -160,7 +163,6 @@ private:
   /// Cost multiplier applied to vertical (z) displacement between adjacent cells.
   /// Higher values make the planner prefer flatter routes.
   double z_penalty_factor_{10.0};
-  std::string map_frame_{"map"};
 };
 
 }  // namespace astar_octo_planner
