@@ -42,8 +42,8 @@ bool AstarOctoPlanner::initialize(const std::string & name,
   const std::string ns = name_ + ".";
   octomap_topic_      = declare_string(ns + "octomap_topic",      "/octomap_binary");
   resolution_         = declare_double(ns + "resolution",         0.1);   // m — grid cell size
-  robot_height_       = declare_double(ns + "robot_height",       0.65);  // m — Spot body height + 5 cm margin
-  robot_radius_       = declare_double(ns + "robot_radius",       0.55);  // m — conservative circumscribed radius
+  robot_height_       = declare_double(ns + "skpawar1305_robot_height",       0.65);  // m — Spot body height + 5 cm margin
+  robot_radius_       = declare_double(ns + "skpawar1305_robot_radius",       0.55);  // m — conservative circumscribed radius
   max_ray_drop_       = declare_double(ns + "max_ray_drop",       3.0);   // m — max downward ray for ground search
   max_slope_deg_      = declare_double(ns + "max_slope_deg",      50.0);  // deg — max traversable terrain slope
   anomaly_filter_enabled_ = [&]() {
