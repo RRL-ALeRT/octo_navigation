@@ -54,26 +54,29 @@ bool AstarOctoPlanner::initialize(const std::string & name,
     if (!node_->has_parameter(ns + "anomaly_min_neighbors")) node_->declare_parameter(ns + "anomaly_min_neighbors", 2);
     return static_cast<int>(node_->get_parameter(ns + "anomaly_min_neighbors").as_int());
   }();
+  z_penalty_factor_   = declare_double(ns + "z_penalty_factor",   3.0);  // cost multiplier for z displacement
   map_frame_          = declare_string(ns + "map_frame",          "map");
 
   octomap_sub_ = node_->create_subscription<octomap_msgs::msg::Octomap>(
-    "/navigation/octomap_binary",
-    rclcpp::QoS(1).transient_local(),
+    "/octomap_binary",
+    rclcpp::QoS(1),
     std::bind(&AstarOctoPlanner::octomapCallback, this, std::placeholders::_1));
 
   path_pub_ = node_->create_publisher<nav_msgs::msg::Path>(
-    name_ + "/path", rclcpp::QoS(1).transient_local());
+    "/move_base_flex/path", rclcpp::QoS(1).transient_local());
 
   traversable_cells_pub_ = node_->create_publisher<octomap_msgs::msg::Octomap>(
     name_ + "/traversable_cells", rclcpp::QoS(1).transient_local());
 
   RCLCPP_INFO(node_->get_logger(),
     "[%s] Initialized (Spot) — octomap_topic=%s height=%.2f m radius=%.2f m "
-    "max_slope=%.1f° (z_offset=%.3f m) max_ray_drop=%.2f m res=%.3f m anomaly_filter=%s(min_nb=%d)",
+    "max_slope=%.1f° (z_offset=%.3f m) max_ray_drop=%.2f m res=%.3f m "
+    "z_penalty_factor=%.1f anomaly_filter=%s(min_nb=%d)",
     name_.c_str(), octomap_topic_.c_str(),
     robot_height_, robot_radius_,
     max_slope_deg_, robot_radius_ * std::tan(max_slope_deg_ * M_PI / 180.0),
     max_ray_drop_, resolution_,
+    z_penalty_factor_,
     anomaly_filter_enabled_ ? "on" : "off", anomaly_min_neighbors_);
   return true;
 }
@@ -414,6 +417,15 @@ uint32_t AstarOctoPlanner::makePlan(
                                  1.41421356, 1.41421356,
                                  1.41421356, 1.41421356 };
 
+  // Helper: get the floor Z (centre of lowest traversable voxel top) for a cached cell.
+  auto getCellZ = [&](const GridCell & c) -> double {
+    auto it = trav_cache.find(c);
+    if (it == trav_cache.end() || it->second.empty()) return 0.0;
+    const auto min_it = std::min_element(it->second.begin(), it->second.end(),
+      [](const octomap::point3d & a, const octomap::point3d & b) { return a.z() < b.z(); });
+    return static_cast<double>(min_it->z()) + resolution_ * 0.5;
+  };
+
   while (!open_set.empty()) {
     if (cancel_planning_) {
       message = "Planning cancelled.";
@@ -452,7 +464,8 @@ uint32_t AstarOctoPlanner::makePlan(
       // fails (goal may be at an obstacle edge; tolerance handling is upstream).
       if (nb != snapped_goal && !isTraversable(nb.first, nb.second)) continue;
 
-      const double tentative_g = cur_g + SC[i] * resolution_;
+      const double dz = std::abs(getCellZ(nb) - getCellZ(current));
+      const double tentative_g = cur_g + SC[i] * resolution_ + z_penalty_factor_ * dz;
       const auto git = g_score.find(nb);
       if (git == g_score.end() || tentative_g < git->second) {
         came_from[nb] = current;

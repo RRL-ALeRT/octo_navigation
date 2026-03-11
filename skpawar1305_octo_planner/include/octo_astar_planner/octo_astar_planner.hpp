@@ -157,6 +157,9 @@ private:
   // Anomaly voxels are ignored in both ground-finding and clearance checks.
   bool   anomaly_filter_enabled_{true};
   int    anomaly_min_neighbors_{2};  ///< Minimum occupied 6-neighbors to consider a voxel real.
+  /// Cost multiplier applied to vertical (z) displacement between adjacent cells.
+  /// Higher values make the planner prefer flatter routes.
+  double z_penalty_factor_{3.0};
   std::string map_frame_{"map"};
 };
 
