@@ -14,6 +14,8 @@ move_base_flex:
       cost_limit: 0.8
       publish_vector_field: true
       octomap_topic: '/octomap_binary_local'
+      robot_radius: 0.0
+      robot_height: 0.0
     planner_patience: 10.0
     planner_max_retries: 2
 
