@@ -1,0 +1,34 @@
+move_base_flex:
+  ros__parameters:
+    global_frame: 'map'
+    robot_frame: 'base_link'
+    odom_topic: '/odometry'
+
+    use_sim_time: false
+    force_stop_at_goal: true
+    force_stop_on_cancel: true
+
+    planners: ['octo_planner']
+    octo_planner:
+      type: 'astar_2d_planner/Astar2dPlanner'
+      cost_limit: 0.95
+      publish_vector_field: true
+      obstacle_inflation_radius: 0.8  # meters - safety distance from obstacles
+      inflation_decay_rate: 0.5       # how quickly cost decays from obstacle edge
+    planner_patience: 2.0
+    planner_max_retries: 0
+
+    controllers: ['octo_controller']
+    octo_controller:
+      type: 'octo_controller/OctoController'
+      ang_vel_factor: 0.25
+      lin_vel_factor: 0.3
+      max_lin_velocity: 0.3
+      max_ang_velocity: 0.25
+
+    controller_patience: 2.0
+    controller_max_retries: 4
+    dist_tolerance: 0.3
+    angle_tolerance: 6.0
+    cmd_vel_ignored_tolerance: 15.0
+    controller_frequency: 50.0
