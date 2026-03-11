@@ -54,7 +54,7 @@ bool AstarOctoPlanner::initialize(const std::string & name,
     if (!node_->has_parameter(ns + "anomaly_min_neighbors")) node_->declare_parameter(ns + "anomaly_min_neighbors", 2);
     return static_cast<int>(node_->get_parameter(ns + "anomaly_min_neighbors").as_int());
   }();
-  z_penalty_factor_   = declare_double(ns + "z_penalty_factor",   3.0);  // cost multiplier for z displacement
+  z_penalty_factor_   = declare_double(ns + "z_penalty_factor",   10.0);  // cost multiplier for z displacement
   map_frame_          = declare_string(ns + "map_frame",          "map");
 
   octomap_sub_ = node_->create_subscription<octomap_msgs::msg::Octomap>(
