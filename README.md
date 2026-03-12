@@ -14,7 +14,7 @@ octomapping:
 https://github.com/RRL-ALeRT/octomap_mapping
 
 webots spot mbf octo branch:
-https://github.com/MASKOR/webots_ros2_spot/tree/mbf_octo_nav
+https://github.com/RRL-ALeRT/octomap_mapping/tree/feature/global_and_local_mapping
 
 
 ### Building
