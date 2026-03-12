@@ -85,10 +85,17 @@ uint32_t OctoController::computeVelocityCommands(const geometry_msgs::msg::PoseS
   double linear_vel = 0.0;
   double angular_vel = 0.0;
   int new_index = pursuit_index_;
+  bool forward = true;
+  if (!current_plan_.empty()) {
+    double dz = current_plan_.front().pose.position.z - current_plan_.back().pose.position.z;
+    if (dz > 1.0) {  // 1.0 meter height difference threshold
+      forward = false;
+    }
+  }
   std::tie(linear_vel, angular_vel, new_index) =
       purePursuit(current_x, current_y, current_heading,
                   current_plan_, pursuit_index_,
-                  config_.max_lin_velocity, config_.max_search_distance, true);
+                  config_.max_lin_velocity, config_.max_search_distance, forward);
 
   pursuit_index_ = new_index;
 
