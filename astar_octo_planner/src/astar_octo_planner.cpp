@@ -1935,7 +1935,6 @@ std::string AstarOctoPlanner::findClosestGraphNode(const octomap::point3d& p) co
   std::string best_id;
   // First pass: find candidates within XY radius, prefer lowest z (floor)
   const double xy_search_radius = 1.0;  // 1m XY search radius
-  const double max_z_above_query = 0.3; // Only consider nodes up to 30cm above query point
 
   for (const auto &kv : graph_nodes_) {
     // Only consider walkable nodes for path planning
@@ -1947,7 +1946,7 @@ std::string AstarOctoPlanner::findClosestGraphNode(const octomap::point3d& p) co
     if (dxy_sq > xy_search_radius * xy_search_radius) continue;
     // Skip if node is above the query point (robot legs are above floor)
     double node_z = kv.second.center.z();
-    if (node_z > p.z() + max_z_above_query) continue;
+    if (node_z > p.z() + max_z_above_query_) continue;
     // Score: prefer low z (floor), with small XY penalty
     double score = node_z + 0.1 * std::sqrt(dxy_sq);
     if (score < best) { best = score; best_id = kv.first; }
@@ -1975,7 +1974,6 @@ std::string AstarOctoPlanner::findClosestGraphNode(const octomap::point3d& p, co
   std::string best_id;
   // First pass: find candidates within XY radius, prefer lowest z (floor)
   const double xy_search_radius = 1.0;  // 1m XY search radius
-  const double max_z_above_query = 0.3; // Only consider nodes up to 30cm above query point
 
   for (const auto &kv : graph->nodes) {
     // Only consider walkable nodes for path planning
@@ -1987,7 +1985,7 @@ std::string AstarOctoPlanner::findClosestGraphNode(const octomap::point3d& p, co
     if (dxy_sq > xy_search_radius * xy_search_radius) continue;
     // Skip if node is too far above the query point
     double node_z = kv.second.center.z();
-    if (node_z > p.z() + max_z_above_query) continue;
+    if (node_z > p.z() + max_z_above_query_) continue;
     // Score: prefer nodes closest in z to the query point (raycast hit),
     // with small XY penalty to break ties.
     double dz = std::abs(node_z - p.z());
@@ -2753,6 +2751,7 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name, const rclcpp::
   stair_max_xy_dist_ = node_->declare_parameter(name_ + ".stair_max_xy_dist", stair_max_xy_dist_);
   stair_min_chain_length_ = node_->declare_parameter(name_ + ".stair_min_chain_length", stair_min_chain_length_);
   stair_max_tread_thickness_ = node_->declare_parameter(name_ + ".stair_max_tread_thickness", stair_max_tread_thickness_);
+  max_z_above_query_ = node_->declare_parameter(name_ + ".max_z_above_query", max_z_above_query_);
   // corner/edge penalty parameters
   corner_radius_ = node_->declare_parameter(name_ + ".corner_radius", 0.40);
   corner_penalty_weight_ = node_->declare_parameter(name_ + ".corner_penalty_weight", corner_penalty_weight_);
@@ -3250,6 +3249,9 @@ rcl_interfaces::msg::SetParametersResult AstarOctoPlanner::reconfigureCallback(s
       centroid_lambda_ = parameter.as_double();
       penalties_dirty_ = true;
       RCLCPP_INFO(node_->get_logger(), "Updated centroid_lambda to %.2f (penalties will be recomputed on next plan)", centroid_lambda_);
+    } else if (parameter.get_name() == name_ + ".max_z_above_query") {
+      max_z_above_query_ = parameter.as_double();
+      RCLCPP_INFO(node_->get_logger(), "Updated max_z_above_query to %.2f", max_z_above_query_);
     }
   }
   result.successful = true;

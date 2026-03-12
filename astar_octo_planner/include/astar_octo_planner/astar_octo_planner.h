@@ -332,6 +332,9 @@ private:
   double stair_max_xy_dist_ = 0.40; // max horizontal distance between consecutive treads (m)
   int    stair_min_chain_length_ = 3; // minimum treads to qualify as a staircase
   double stair_max_tread_thickness_ = 0.25; // max vertical thickness (m) of occupied column to count as a tread (rejects walls)
+  // Maximum Z distance above the query point to consider when snapping to the
+  // closest graph node (meters). Increase for tall stairs / steep ramps.
+  double max_z_above_query_ = 0.4;
 
   // Minimum bound for the occupancy grid.
   std::array<double, 3> min_bound_;
