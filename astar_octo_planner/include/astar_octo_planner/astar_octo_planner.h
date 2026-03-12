@@ -334,7 +334,7 @@ private:
   double stair_max_tread_thickness_ = 0.25; // max vertical thickness (m) of occupied column to count as a tread (rejects walls)
   // Maximum Z distance above the query point to consider when snapping to the
   // closest graph node (meters). Increase for tall stairs / steep ramps.
-  double max_z_above_query_ = 0.4;
+  double max_z_above_query_ = 0.5;
 
   // Minimum bound for the occupancy grid.
   std::array<double, 3> min_bound_;
