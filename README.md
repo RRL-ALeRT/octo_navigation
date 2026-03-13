@@ -5,9 +5,9 @@
 ### Dependencies
 
 move base flex:
-https://github.com/METEORITENMAX/move_base_flex
-or
-https://github.com/naturerobots/move_base_flex
+https://github.com/METEORITENMAX/move_base_flex/tree/humble
+(originally:
+https://github.com/naturerobots/move_base_flex)
 
 octomapping:
 
