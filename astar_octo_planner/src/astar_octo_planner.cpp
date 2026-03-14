@@ -961,7 +961,12 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
               if (enable_radial_clearance_ && !hasRadialClearanceAbove(local_nodes.at(nb).center, local_nodes.at(nb).size)) { ++rejected_radial_clearance; continue; }
               // Edge collision: sample the straight line between current and neighbor
               // at body-height Z-slices to ensure we don't cross through walls.
-              if (enable_edge_collision_check_ && !isEdgeCollisionFree(local_nodes.at(cur.id).center, local_nodes.at(nb).center)) { ++rejected_edge_collision; continue; }
+              if (enable_edge_collision_check_ &&
+                  !isEdgeCollisionFree(local_nodes.at(cur.id).center, local_nodes.at(cur.id).size,
+                                       local_nodes.at(nb).center, local_nodes.at(nb).size)) {
+                ++rejected_edge_collision;
+                continue;
+              }
               ++accepted_neighbors;
               const auto &cur_node = local_nodes.at(cur.id);
               const auto &nb_node  = local_nodes.at(nb);
@@ -2484,12 +2489,32 @@ size_t AstarOctoPlanner::revalidateWalkability(std::shared_ptr<GraphData>& graph
 }
 
 // ---------------------------------------------------------------------------
-// Live vertical clearance check (collision variant — uses robot_height_)
-// Used during A* expansion to reject nodes the robot can't physically fit through.
+// Live vertical clearance check (collision variant — uses robot_height_).
+// Occupancy in the first max_step_height_ above the current surface is ignored,
+// because that band may belong to a climbable neighboring step / ramp.
 // ---------------------------------------------------------------------------
 bool AstarOctoPlanner::hasVerticalClearance(const octomap::point3d& center, double node_size) const
 {
-  return hasVerticalClearance(center, node_size, robot_height_);
+  if (!octree_) return true;
+  if (robot_height_ <= 0.0) return true;
+
+  const double climbable_height = std::max(0.0, max_step_height_);
+  const double stepz = std::max(active_voxel_size_, 0.05);
+  const double voxel_top = center.z() + 0.5 * node_size;
+  const double z_start = voxel_top + climbable_height + 0.01;
+  const double z_end = voxel_top + robot_height_;
+
+  if (z_start > z_end + 1e-6) {
+    return true;
+  }
+
+  for (double z = z_start; z <= z_end + 1e-6; z += stepz) {
+    octomap::OcTreeNode* nn = octree_->search(center.x(), center.y(), z);
+    if (nn && octree_->isNodeOccupied(nn)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2516,25 +2541,29 @@ bool AstarOctoPlanner::hasVerticalClearance(const octomap::point3d& center, doub
 // ---------------------------------------------------------------------------
 // Radial clearance check from free space above a walkable node.
 // The node sits on a floor surface; checking horizontally at floor level would
-// hit adjacent floor voxels.  Instead we step into the free column above the
-// surface and sample radially at robot_radius_ to detect walls / narrow gaps.
+// hit adjacent floor voxels. Instead we step above the climbable step band and
+// sample radially at robot_radius_ to detect walls / narrow gaps.
 // Returns true if the robot body fits horizontally at this location.
 // ---------------------------------------------------------------------------
 bool AstarOctoPlanner::hasRadialClearanceAbove(const octomap::point3d& center, double node_size) const
 {
   if (!octree_) return true;
-  // Nothing to check when radius is zero or negative
-  if (robot_radius_ <= 0.0) return true;
+  if (robot_radius_ <= 0.0 || robot_height_ <= 0.0) return true;
 
   const double voxel_top = center.z() + 0.5 * node_size;
+  const double climbable_height = std::max(0.0, max_step_height_);
+  const double z_min = voxel_top + climbable_height + 0.02;
+  const double z_max = voxel_top + robot_height_;
+  if (z_min > z_max + 1e-6) return true;
+
   const int num_dirs = std::max(4, radial_clearance_num_dirs_);
   const int num_z   = std::max(1, radial_clearance_num_z_);
   const double angle_step = 2.0 * M_PI / static_cast<double>(num_dirs);
 
-  // Sample Z-slices from just above the surface up to robot_height_
+  // Sample Z-slices only in the body band above the climbable step allowance.
   for (int iz = 0; iz < num_z; ++iz) {
     double frac = num_z == 1 ? 0.5 : static_cast<double>(iz) / static_cast<double>(num_z - 1);
-    double z = voxel_top + 0.02 + frac * robot_height_;  // 0.02 offset to clear floor surface
+    double z = z_min + frac * (z_max - z_min);
 
     for (int idir = 0; idir < num_dirs; ++idir) {
       double angle = idir * angle_step;
@@ -2553,15 +2582,14 @@ bool AstarOctoPlanner::hasRadialClearanceAbove(const octomap::point3d& center, d
 // check multiple Z heights (from above surface up to robot_height_) for occupied voxels.
 // This prevents A* from connecting two walkable floor nodes across a wall.
 //
-// IMPORTANT: Graph node centers sit INSIDE occupied floor voxels. When
-// interpolating Z between two nodes at different heights the raw z may dip into
-// the floor slab of the higher node, causing false collision detections.
-// To avoid this we compute the *top* of the interpolated surface (center.z +
-// half voxel) and only check the free body column above that.
-bool AstarOctoPlanner::isEdgeCollisionFree(const octomap::point3d& from, const octomap::point3d& to) const
+// IMPORTANT: Graph node centers sit inside occupied floor voxels. We therefore
+// use the ACTUAL endpoint voxel sizes to compute the true surface height and we
+// ignore the first max_step_height_ above that surface so climbable treads do
+// not get treated as wall collisions.
+bool AstarOctoPlanner::isEdgeCollisionFree(const octomap::point3d& from, double from_size,
+                                           const octomap::point3d& to, double to_size) const
 {
   if (!octree_) return true;
-  // Nothing to check when robot body height is zero or negative
   if (robot_height_ <= 0.0) return true;
 
   double dist = from.distance(to);
@@ -2571,16 +2599,13 @@ bool AstarOctoPlanner::isEdgeCollisionFree(const octomap::point3d& from, const o
   double step = std::max(active_voxel_size_ * 0.5, 0.05);
   int n_samples = std::max(2, static_cast<int>(std::ceil(dist / step)));
 
-  const double voxel_half = active_voxel_size_ * 0.5;
-  // Minimum body-check height: always check at least one full voxel above surface
-  const double min_body_height = std::max(robot_height_, active_voxel_size_);
+  const double climbable_height = std::max(0.0, max_step_height_);
   const double z_step = std::max(active_voxel_size_, 0.1);
-  const int n_z = std::max(2, static_cast<int>(std::ceil(min_body_height / z_step)));
 
   // Compute the TOP of each endpoint's voxel (surface level) so interpolation
   // stays on/above the surface rather than dipping into the floor.
-  const double from_top = from.z() + voxel_half;
-  const double to_top   = to.z()   + voxel_half;
+  const double from_top = from.z() + 0.5 * from_size;
+  const double to_top   = to.z()   + 0.5 * to_size;
 
   for (int i = 1; i < n_samples; ++i) {  // skip endpoints (they're already validated as walkable)
     double t = static_cast<double>(i) / static_cast<double>(n_samples);
@@ -2589,10 +2614,18 @@ bool AstarOctoPlanner::isEdgeCollisionFree(const octomap::point3d& from, const o
     // Interpolate the SURFACE top, not the center
     double surface_z = from_top + t * (to_top - from_top);
 
-    // Check body column: from just above surface up to robot_height_
+    const double z_start = surface_z + climbable_height + 0.01;
+    const double z_end = surface_z + robot_height_;
+    if (z_start > z_end + 1e-6) {
+      continue;
+    }
+
+    const double body_band = z_end - z_start;
+    const int n_z = std::max(1, static_cast<int>(std::ceil(body_band / z_step)));
+
     for (int iz = 0; iz <= n_z; ++iz) {
-      double frac = static_cast<double>(iz) / static_cast<double>(n_z);
-      double check_z = surface_z + 0.01 + frac * min_body_height;
+      double frac = n_z == 0 ? 0.0 : static_cast<double>(iz) / static_cast<double>(n_z);
+      double check_z = z_start + frac * body_band;
       octomap::OcTreeNode* nn = octree_->search(sx, sy, check_z);
       if (nn && octree_->isNodeOccupied(nn)) {
         return false;  // Wall or obstacle in the way

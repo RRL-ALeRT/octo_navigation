@@ -205,9 +205,10 @@ private:
   // injects direct edges between consecutive treads.
   void detectAndAugmentStairs();
 
-  // Live vertical clearance check: query the octree at a node's position to verify
-  // no occupied voxel exists within robot_height_ above the surface.
-  // Used during A* expansion for collision checking (does NOT modify the graph).
+  // Live vertical clearance check used during A* expansion.
+  // Occupancy within max_step_height_ above the current surface is tolerated,
+  // because that space can belong to a climbable neighboring tread / ramp.
+  // Only occupancy above that climbable band is treated as a collision.
   bool hasVerticalClearance(const octomap::point3d& center, double node_size) const;
 
   // Overload with explicit check_height (meters above voxel top to scan).
@@ -215,16 +216,16 @@ private:
   // so that walkability classification is independent of robot_height_.
   bool hasVerticalClearance(const octomap::point3d& center, double node_size, double check_height) const;
 
-  // Check radial clearance from the free space ABOVE a walkable node.
-  // Samples directions around (center.x, center.y) at body-height Z-slices
-  // (just above the surface up to robot_height_) and rejects if any occupied
-  // voxel is found within robot_radius_.  This avoids false positives from
-  // checking at floor level where adjacent floor voxels would collide.
+  // Check radial clearance from the free space above a walkable node.
+  // The climbable band up to max_step_height_ is ignored so nearby steps / ramps
+  // do not get treated as walls. Only occupancy above that band rejects the node.
   bool hasRadialClearanceAbove(const octomap::point3d& center, double node_size) const;
 
   // Check that a straight-line edge between two 3D points is collision-free
-  // at robot body heights (samples multiple Z slices between ground and robot_height_).
-  bool isEdgeCollisionFree(const octomap::point3d& from, const octomap::point3d& to) const;
+  // above the climbable step-height band. Endpoint voxel sizes are passed in so
+  // the free-space check starts above the true surface, not above the global map resolution.
+  bool isEdgeCollisionFree(const octomap::point3d& from, double from_size,
+                           const octomap::point3d& to, double to_size) const;
 
   // Temporarily clear occupied voxels within a vertical cylinder around a point
   // center: world coordinates of cylinder center
