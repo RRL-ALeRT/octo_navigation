@@ -10,14 +10,13 @@ move_base_flex:
 
     planners: ['octo_planner']
     octo_planner:
-      type: 'astar_octo_planner/AstarOctoPlanner'
-      cost_limit: 0.8
+      type: 'astar_2d_planner/Astar2dPlanner'
+      cost_limit: 0.95
       publish_vector_field: true
-      octomap_topic: '/octomap_binary_local'
-      robot_radius: 0.0
-      robot_height: 0.0
-    planner_patience: 10.0
-    planner_max_retries: 2
+      obstacle_inflation_radius: 0.8  # meters - safety distance from obstacles
+      inflation_decay_rate: 0.5       # how quickly cost decays from obstacle edge
+    planner_patience: 2.0
+    planner_max_retries: 0
 
     controllers: ['octo_controller']
     octo_controller:

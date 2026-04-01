@@ -5,13 +5,13 @@
 ### Dependencies
 
 move base flex:
-https://github.com/METEORITENMAX/move_base_flex
-or
-https://github.com/naturerobots/move_base_flex
+https://github.com/METEORITENMAX/move_base_flex/tree/humble
+(originally:
+https://github.com/naturerobots/move_base_flex)
 
 octomapping:
 
-https://github.com/RRL-ALeRT/octomap_mapping
+https://github.com/RRL-ALeRT/octomap_mapping/tree/feature/global_and_local_mapping
 
 webots spot mbf octo branch:
 https://github.com/MASKOR/webots_ros2_spot/tree/mbf_octo_nav

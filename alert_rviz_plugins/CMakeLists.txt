@@ -33,6 +33,8 @@ find_package(geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(mbf_msgs REQUIRED)
+find_package(bring_up_alert_nav REQUIRED)
+find_package(std_srvs REQUIRED)
 
 qt5_wrap_cpp(MOC_FILES
   include/alert_nav_plugins/alert_panel.hpp
@@ -66,6 +68,8 @@ ament_target_dependencies(${PROJECT_NAME}
   tf2_ros
   tf2_geometry_msgs
   mbf_msgs
+  bring_up_alert_nav
+  std_srvs
 )
 
 install(TARGETS ${PROJECT_NAME}

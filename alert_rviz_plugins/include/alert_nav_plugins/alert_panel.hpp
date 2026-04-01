@@ -17,6 +17,8 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
+#include <bring_up_alert_nav/srv/start_nav.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 namespace alert_nav_plugins
 {
@@ -37,11 +39,15 @@ private Q_SLOTS:
   void onFactorChanged(double v);
   void onRadiusChanged(double v);
   void onPlanToFrame();
+  void onExecPath();
+  void onCancelPath();
   void updateButtonUI(bool enabled);
 
 private:
   QPushButton* toggle_btn_ = nullptr;
   QPushButton* plan_btn_ = nullptr;
+  QPushButton* exec_path_btn_ = nullptr;
+  QPushButton* cancel_path_btn_ = nullptr;
   QDoubleSpinBox* factor_spin_ = nullptr;
   QDoubleSpinBox* radius_spin_ = nullptr;
   QLineEdit* frame_input_ = nullptr;
@@ -66,6 +72,13 @@ private:
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   std::string map_frame_ = "map";
   std::string get_path_action_name_ = "/move_base_flex/get_path";
+
+  using StartNav = bring_up_alert_nav::srv::StartNav;
+  rclcpp::Client<StartNav>::SharedPtr exec_path_client_;
+  std::string exec_path_service_name_ = "/exe_path/start_nav";
+
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr cancel_path_client_;
+  std::string cancel_path_service_name_ = "/exe_path/cancel_nav";
 };
 
 } // namespace alert_nav_plugins
