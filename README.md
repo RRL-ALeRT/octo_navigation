@@ -1,7 +1,7 @@
 # octo_navigation
 Real-time 3D Navigation based on OctoMaps for unstructured environments.
 
-![ALeRT 3D Nav](https://https://github.com/RRL-ALeRT/octo_navigation/blob/main/alert_3dnav.png)
+![ALeRT 3D Nav](https://github.com/RRL-ALeRT/octo_navigation/blob/main/alert_3dnav.png)
 
 ## Installation
 
