@@ -9,6 +9,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <mbf_msgs/action/move_base.hpp>
 #include <mbf_msgs/action/get_path.hpp>
+#include <algorithm> 
 
 #define auto_execute_goal_ 0
 
@@ -174,14 +175,17 @@ private:
   {
     RCLCPP_INFO(get_logger(), "Triggered Exe path");
     const nav_msgs::msg::Path *chosen = nullptr;
+    bool is_reverse = false;
+
     switch (req->mode)
     {
-      case 1: chosen = &latest_path_;    break;
+      case 1: chosen = &latest_path_; break;
       case 2: chosen = &latest_path__smooth_; break;
+      case 3: chosen = &latest_path_; is_reverse = true; break;
       default:
-      res->success = false;
-      res->message = "data=false -> ignore";
-      return;
+        res->success = false;
+        res->message = "data=false -> ignore";
+        return;
     }
 
     if(chosen->poses.empty()){
@@ -196,9 +200,24 @@ private:
       return;
     }
 
+    // 1. Copy the path so we can modify it
+    nav_msgs::msg::Path final_path = *chosen;
+
+    // 2. If Tracing Back, reverse the array of waypoints
+    if (is_reverse) {
+        std::reverse(final_path.poses.begin(), final_path.poses.end());
+    }
+
+    // 3. Freshen timestamps 
+    rclcpp::Time current_time = this->now();
+    final_path.header.stamp = current_time;
+    for (auto & pose : final_path.poses) {
+        pose.header.stamp = current_time;
+    }
+
     // action goal
     mbf_msgs::action::ExePath::Goal goal;
-    goal.path = *chosen;
+    goal.path = final_path;
 
     auto send_opts = rclcpp_action::Client<mbf_msgs::action::ExePath>::SendGoalOptions();
     send_opts.goal_response_callback =
@@ -211,11 +230,11 @@ private:
             exe_path_goal_handle_ = handle;
           }
         };
-    auto send =
-      exe_path_ac_->async_send_goal(goal, send_opts);
+    
+    exe_path_ac_->async_send_goal(goal, send_opts);
 
     res->success = true;
-    res->message = "ExePath sent";
+    res->message = is_reverse ? "Tracing back to start" : "ExePath sent";
   }
 
   /* ---------- members ---------- */
