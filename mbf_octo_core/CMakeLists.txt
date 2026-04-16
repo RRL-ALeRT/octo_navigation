@@ -4,6 +4,10 @@ project(mbf_octo_core)
 find_package(ament_cmake_ros REQUIRED)
 set(dependencies
   mbf_abstract_core
+  octomap
+  octomap_msgs
+  visualization_msgs
+  geometry_msgs
 )
 
 foreach(dep IN LISTS dependencies)
