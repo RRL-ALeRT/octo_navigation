@@ -14,9 +14,12 @@ set(dependencies
   mbf_octo_core
   mbf_msgs
   nav_msgs
+  octomap
+  octomap_msgs
   pluginlib
   rclcpp
   std_srvs
+  visualization_msgs
 )
 foreach(dep IN LISTS dependencies)
   find_package(${dep} REQUIRED)
@@ -36,6 +39,7 @@ include_directories(
 
 add_library(mbf_octo_server
   src/octo_controller_execution.cpp
+  src/octo_mapping_server.cpp
   src/octo_navigation_server.cpp
   src/octo_planner_execution.cpp
   src/octo_recovery_execution.cpp

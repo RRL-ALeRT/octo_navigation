@@ -43,6 +43,7 @@
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <mbf_abstract_core/abstract_planner.h>
+#include <mbf_octo_core/octo_mapper.h>
 #include <rclcpp/rclcpp.hpp>
 
 
@@ -81,12 +82,17 @@ public:
   virtual bool cancel() = 0;
 
   /**
-   * @brief Initializes the planner plugin with a user configured name and a shared pointer to the mesh map
-   * @param name The user configured name, which is used as namespace for parameters, etc.
-   * @param mesh_map_ptr A shared pointer to the mesh map instance to access attributes and helper functions, etc.
-   * @return true if the plugin has been initialized successfully
+   * @brief Initializes the planner plugin.
+   * @param name     The user-configured name; used as parameter namespace.
+   * @param node     Shared pointer to the ROS node.
+   * @param mapper   Shared pointer to the OctoMapper that owns the live graph,
+   *                 octree, and costmap.  The planner must not build or own map
+   *                 state — it accesses everything through this interface.
+   * @return true if initialization succeeded.
    */
-  virtual bool initialize(const std::string& name, const rclcpp::Node::SharedPtr& node) = 0;
+  virtual bool initialize(const std::string& name,
+                          const rclcpp::Node::SharedPtr& node,
+                          const mbf_octo_core::OctoMapper::Ptr& mapper) = 0;
 
 protected:
   OctoPlanner() {};

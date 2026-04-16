@@ -137,6 +137,10 @@ OctoNavigationServer::OctoNavigationServer(const TFPtr& tf_listener_ptr, const r
   , simple_controller_plugin_loader_("mbf_simple_core", "mbf_simple_core::SimpleController")
   , simple_planner_plugin_loader_("mbf_simple_core", "mbf_simple_core::SimplePlanner")
 {
+  // Create and initialise the mapping server before any planner plugin is loaded.
+  mapping_server_ = std::make_shared<OctoMappingServer>();
+  mapping_server_->initialize("octo_mapping_server", node_);
+
   // advertise services and current goal topic
   check_pose_cost_srv_ =
       node_->create_service<mbf_msgs::srv::CheckPose>("~/check_pose_cost", std::bind(&OctoNavigationServer::callServiceCheckPoseCost, this, _1, _2, _3));
@@ -185,7 +189,7 @@ bool OctoNavigationServer::initializePlannerPlugin(const std::string& name,
   if (octo_planner_ptr)
   {
 
-    return octo_planner_ptr->initialize(name, node_);
+    return octo_planner_ptr->initialize(name, node_, mapping_server_);
   }
 
   mbf_simple_core::SimplePlanner::Ptr simple_planner_ptr =

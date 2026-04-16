@@ -45,6 +45,7 @@
 #include "octo_controller_execution.h"
 #include "octo_planner_execution.h"
 #include "octo_recovery_execution.h"
+#include "octo_mapping_server.h"
 
 #include <mbf_msgs/srv/check_path.hpp>
 #include <mbf_msgs/srv/check_pose.hpp>
@@ -188,6 +189,10 @@ private:
    * @param response Empty response object.
    */
   void callServiceClearOcto(std::shared_ptr<rmw_request_id_t> request_header, std::shared_ptr<std_srvs::srv::Empty::Request> request, std::shared_ptr<std_srvs::srv::Empty::Response> response);
+
+  //! Mapping server — owns the octree, graph building, and costmap computation.
+  //! Created in the constructor and injected into every OctoPlanner plugin.
+  OctoMappingServer::Ptr mapping_server_;
 
   //! plugin class loader for recovery behaviors plugins
   pluginlib::ClassLoader<mbf_octo_core::OctoRecovery> recovery_plugin_loader_;
