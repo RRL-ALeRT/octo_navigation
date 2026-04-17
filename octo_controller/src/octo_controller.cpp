@@ -88,7 +88,7 @@ uint32_t OctoController::computeVelocityCommands(const geometry_msgs::msg::PoseS
   std::tie(linear_vel, angular_vel, new_index) =
       purePursuit(current_x, current_y, current_heading,
                   current_plan_, pursuit_index_,
-                  config_.max_lin_velocity, config_.max_search_distance, true);
+                  config_.max_lin_velocity, config_.max_search_distance);
 
   pursuit_index_ = new_index;
 
@@ -103,6 +103,9 @@ uint32_t OctoController::computeVelocityCommands(const geometry_msgs::msg::PoseS
 }
 
 // Signature: returns {v, desired_steering_angle, new_index}
+// Direction (forward/backward) is determined automatically from the dot product of the
+// vector to the lookahead point with the robot's heading: dot < 0 means the target is
+// behind the robot, so we drive in reverse (negative linear velocity).
 std::tuple<double, double, int> OctoController::purePursuit(
     double current_x,
     double current_y,
@@ -110,8 +113,7 @@ std::tuple<double, double, int> OctoController::purePursuit(
     const std::vector<geometry_msgs::msg::PoseStamped> & path,
     int index,
     double speed,
-    double lookahead_distance,
-    bool forward)
+    double lookahead_distance)
 {
     bool found = false;
     std::pair<double, double> closest_point;
@@ -132,35 +134,32 @@ std::tuple<double, double, int> OctoController::purePursuit(
     double v;
     double desired_steering_angle;
     if (found) {
-        // Calculate the lookahead angle
-        double lookahead_angle = std::atan2(closest_point.second - current_y,
-                                            closest_point.first - current_x);
-        // Compute angle difference and normalize it to [-pi, pi]
-        double angle_diff = lookahead_angle - current_heading;
-        angle_diff = std::fmod(angle_diff + M_PI, 2 * M_PI) - M_PI;
+        // Is the lookahead point in front of or behind the robot?
+        // Positive dot product: point is in the forward half-plane -> drive forward.
+        // Negative dot product: point is in the rear half-plane    -> drive backward.
+        double lx = closest_point.first  - current_x;
+        double ly = closest_point.second - current_y;
+        bool forward = (lx * std::cos(current_heading) + ly * std::sin(current_heading)) >= 0.0;
 
-        // Decide the direction based on the angle difference @skpawar1305?
-        // forward = (std::abs(angle_diff) < M_PI / 2);
         v = forward ? speed : -speed;
 
         double target_heading;
         if (forward) {
-            target_heading = std::atan2(closest_point.second - current_y,
-                                        closest_point.first - current_x);
+            target_heading = std::atan2(ly, lx);
         } else {
-            target_heading = std::atan2(current_y - closest_point.second,
-                                        current_x - closest_point.first);
+            // Point robot's back toward the target: aim the front in the opposite direction.
+            target_heading = std::atan2(-ly, -lx);
         }
         desired_steering_angle = target_heading - current_heading;
     } else {
-        // If no suitable point is found, use the last point in the path.
-        double target_heading;
-        if (forward) {
-            target_heading = std::atan2(path.back().pose.position.y - current_y, path.back().pose.position.x - current_x);
-        } else {
-            target_heading = std::atan2(current_y - path.back().pose.position.y, current_x - path.back().pose.position.x);
-        }
-        desired_steering_angle = target_heading - current_heading;
+        // No suitable lookahead found: steer toward the last waypoint.
+        double lx = path.back().pose.position.x - current_x;
+        double ly = path.back().pose.position.y - current_y;
+        bool forward = (lx * std::cos(current_heading) + ly * std::sin(current_heading)) >= 0.0;
+
+        desired_steering_angle = forward
+            ? std::atan2(ly, lx) - current_heading
+            : std::atan2(-ly, -lx) - current_heading;
         index = path.size() - 1;
         v = forward ? speed : -speed;
     }

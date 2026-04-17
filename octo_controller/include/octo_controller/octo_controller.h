@@ -90,8 +90,7 @@ public:
       const std::vector<geometry_msgs::msg::PoseStamped> & path,
       int index,
       double speed,
-      double lookahead_distance,
-      bool forward);
+      double lookahead_distance);
 
   int pursuit_index_;
 
