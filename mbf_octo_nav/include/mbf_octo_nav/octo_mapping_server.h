@@ -146,7 +146,7 @@ private:
   double octomap_clamp_max_  = 0.95;
 
   // ---- Subscription / build control ----------------------------------------
-  std::string octomap_topic_        = "/navigation/octomap_binary";
+  std::string octomap_topic_        = "/octomap_binary_local";
   bool enable_octomap_updates_      = true;
   bool incremental_graph_build_     = true;
 

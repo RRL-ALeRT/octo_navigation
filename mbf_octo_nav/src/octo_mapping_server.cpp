@@ -85,7 +85,7 @@ void OctoMappingServer::initialize(const std::string & name,
   node_ = node;
 
   // --- Octomap subscription -------------------------------------------------
-  octomap_topic_ = node_->declare_parameter(name_ + ".octomap_topic", "/octomap_binary_local");
+  octomap_topic_ = node_->declare_parameter(name_ + ".octomap_topic", octomap_topic_);
   octomap_sub_ = node_->create_subscription<octomap_msgs::msg::Octomap>(
     octomap_topic_, 1,
     std::bind(&OctoMappingServer::octomapCallback, this, std::placeholders::_1));
