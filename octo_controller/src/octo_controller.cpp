@@ -35,6 +35,7 @@
  *
  */
 
+#include <algorithm>
 #include <mbf_msgs/action/exe_path.hpp>
 #include <octo_controller/octo_controller.h>
 #include <pluginlib/class_list_macros.hpp>
@@ -81,16 +82,57 @@ uint32_t OctoController::computeVelocityCommands(const geometry_msgs::msg::PoseS
   double current_heading = std::atan2(2.0 * (qw * qz + qx * qy),
                                      1.0 - 2.0 * (qy * qy + qz * qz));
 
-  // Call the pure pursuit function.
+  // Distance and heading error to the final goal.
+  double gdx = goal_pos_.pose.position.x - current_x;
+  double gdy = goal_pos_.pose.position.y - current_y;
+  double goal_dist = std::hypot(gdx, gdy);
+
+  double gqx = goal_pos_.pose.orientation.x;
+  double gqy = goal_pos_.pose.orientation.y;
+  double gqz = goal_pos_.pose.orientation.z;
+  double gqw = goal_pos_.pose.orientation.w;
+  double goal_yaw = std::atan2(2.0*(gqw*gqz + gqx*gqy), 1.0 - 2.0*(gqy*gqy + gqz*gqz));
+  // std::remainder gives the IEEE remainder, always in (-π, π] — correct shortest-path wrap.
+  // std::fmod keeps the dividend's sign so it breaks for negative differences.
+  double angle_err = std::remainder(goal_yaw - current_heading, 2.0 * M_PI);
+
+  // Whether the goal pose carries a meaningful orientation (the A* planner emits
+  // identity quaternions, so we only enforce angle alignment when it is non-identity).
+  bool has_goal_orientation = std::abs(gqw - 1.0) > 1e-3 || std::abs(gqx) > 1e-3 ||
+                               std::abs(gqy) > 1e-3    || std::abs(gqz) > 1e-3;
+
   double linear_vel = 0.0;
   double angular_vel = 0.0;
   int new_index = pursuit_index_;
-  std::tie(linear_vel, angular_vel, new_index) =
-      purePursuit(current_x, current_y, current_heading,
-                  current_plan_, pursuit_index_,
-                  config_.max_lin_velocity, config_.max_search_distance);
 
-  pursuit_index_ = new_index;
+  if (goal_dist < config_.arrival_fading) {
+    // Parking mode: pure pursuit is disabled to prevent back-and-forth oscillation.
+    // Stop linear motion; apply a P-controller for heading only if the goal has a
+    // meaningful orientation, otherwise just hold still.
+    linear_vel = 0.0;
+    if (has_goal_orientation) {
+      // Full max speed until within the fine-alignment zone, then P-controller.
+      // The zone boundary (max_ang / ang_vel_factor) is where P output equals max speed,
+      // so the transition is continuous — no velocity jump.
+      const double fine_zone = config_.max_ang_velocity /
+                               std::max(config_.ang_vel_factor, 0.1);
+      if (std::abs(angle_err) > fine_zone) {
+        angular_vel = std::copysign(config_.max_ang_velocity, angle_err);
+      } else {
+        angular_vel = config_.ang_vel_factor * angle_err;  // within [-max, max] by construction
+      }
+    } else {
+      angular_vel = 0.0;
+    }
+    RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 500,
+      "Parking: dist=%.3f angle_err=%.3f ang_vel=%.3f", goal_dist, angle_err, angular_vel);
+  } else {
+    std::tie(linear_vel, angular_vel, new_index) =
+        purePursuit(current_x, current_y, current_heading,
+                    current_plan_, pursuit_index_,
+                    config_.max_lin_velocity, config_.max_search_distance);
+    pursuit_index_ = new_index;
+  }
 
   // Use the computed velocities.
   cmd_vel.twist.linear.x = linear_vel;
@@ -182,16 +224,26 @@ std::tuple<double, double, int> OctoController::purePursuit(
 
 bool OctoController::isGoalReached(double dist_tolerance, double angle_tolerance)
 {
-  // Calculate the Euclidean distance between the robot's current position and the goal position
   double dx = goal_pos_.pose.position.x - current_pose_.pose.position.x;
   double dy = goal_pos_.pose.position.y - current_pose_.pose.position.y;
-  double dz = goal_pos_.pose.position.z - current_pose_.pose.position.z;
-  double goal_distance = std::sqrt(dx * dx + dy * dy );
-  dist_tolerance = 0.56;
-  //RCLCPP_INFO(node_->get_logger(), "Goal distance: %f,  dist_tolerance: %f", goal_distance, dist_tolerance);
-  // Calculate the angle difference between the robot's current orientation and the goal orientation
-  double angle = std::acos(std::cos(current_pose_.pose.orientation.z - goal_pos_.pose.orientation.z));
-  return goal_distance <= dist_tolerance;
+  double goal_distance = std::hypot(dx, dy);
+  dist_tolerance  = 0.56;
+  angle_tolerance = 0.06;
+
+  // Extract yaw properly from full quaternions (orientation.z alone is NOT yaw)
+  auto yaw_from_quat = [](const geometry_msgs::msg::Quaternion& q) {
+    return std::atan2(2.0*(q.w*q.z + q.x*q.y), 1.0 - 2.0*(q.y*q.y + q.z*q.z));
+  };
+  double current_yaw = yaw_from_quat(current_pose_.pose.orientation);
+  double goal_yaw    = yaw_from_quat(goal_pos_.pose.orientation);
+  double angle_err   = std::fmod(std::abs(goal_yaw - current_yaw) + M_PI, 2.0*M_PI) - M_PI;
+
+  // Only enforce angle when the goal carries a non-identity orientation.
+  // The A* planner emits identity quaternions (w=1), so angle check is skipped in that case.
+  bool has_goal_orientation = std::abs(goal_pos_.pose.orientation.w - 1.0) > 1e-3;
+  bool angle_ok = !has_goal_orientation || std::abs(angle_err) <= angle_tolerance;
+
+  return goal_distance <= dist_tolerance && angle_ok;
 }
 
 bool OctoController::setPlan(const std::vector<geometry_msgs::msg::PoseStamped>& plan)

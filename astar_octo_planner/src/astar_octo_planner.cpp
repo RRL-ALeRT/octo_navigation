@@ -507,6 +507,11 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
     p.pose.orientation.w = 1.0;
     plan.push_back(p);
   }
+  // Propagate the navigation goal's orientation to the last waypoint so the controller
+  // can enforce heading alignment at the goal. All other waypoints keep identity (w=1).
+  if (!plan.empty()) {
+    plan.back().pose.orientation = goal.pose.orientation;
+  }
 
   // Publish start/goal markers
   {

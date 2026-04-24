@@ -152,9 +152,9 @@ private:
 
   struct {
     double max_lin_velocity = 1.0;
-    double max_ang_velocity = 0.5;
+    double max_ang_velocity = 1.0;   // Spot handles 1.0+ rad/s rotation
     double arrival_fading = 0.5;
-    double ang_vel_factor = 1.0;
+    double ang_vel_factor = 6.0;     // fine-alignment zone = max_ang / ang_vel_factor ≈ 0.33 rad
     double lin_vel_factor = 1.0;
     double max_angle = 20.0;
     double max_search_radius = 0.4;
