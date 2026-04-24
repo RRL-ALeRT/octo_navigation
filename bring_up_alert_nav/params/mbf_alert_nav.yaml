@@ -3,7 +3,7 @@ move_base_flex:
     global_frame: 'map'
     robot_frame: 'base_link'
     odom_topic: '/odometry'
-
+    octomap_topic: '/octomap_binary_local'
     use_sim_time: false
     force_stop_at_goal: true
     force_stop_on_cancel: true
@@ -13,7 +13,6 @@ move_base_flex:
       type: 'astar_octo_planner/AstarOctoPlanner'
       cost_limit: 0.8
       publish_vector_field: true
-      octomap_topic: '/octomap_binary_local'
       robot_radius: 0.0
       robot_height: 0.0
     planner_patience: 10.0
@@ -22,14 +21,14 @@ move_base_flex:
     controllers: ['octo_controller']
     octo_controller:
       type: 'octo_controller/OctoController'
-      ang_vel_factor: 0.25
-      lin_vel_factor: 0.3
-      max_lin_velocity: 0.3
-      max_ang_velocity: 0.25
+      ang_vel_factor: 0.3
+      lin_vel_factor: 0.5
+      max_lin_velocity: 0.75
+      max_ang_velocity: 0.5
 
     controller_patience: 2.0
     controller_max_retries: 4
     dist_tolerance: 0.3
-    angle_tolerance: 6.0
+    angle_tolerance: 0.3
     cmd_vel_ignored_tolerance: 15.0
     controller_frequency: 50.0
