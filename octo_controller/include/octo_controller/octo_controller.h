@@ -145,6 +145,10 @@ private:
   //! flag to handle cancel requests
   std::atomic_bool cancel_requested_;
 
+  // Locked rotation direction for parking mode bang-bang phase: +1 CCW, -1 CW, 0 = unset.
+  // Prevents sign flip at the ±π boundary due to sensor noise.
+  double parking_rotation_sign_ = 0.0;
+
   // handle of callback for changing parameters dynamically
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr reconfiguration_callback_handle_;
 

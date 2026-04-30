@@ -117,11 +117,19 @@ uint32_t OctoController::computeVelocityCommands(const geometry_msgs::msg::PoseS
       const double fine_zone = config_.max_ang_velocity /
                                std::max(config_.ang_vel_factor, 0.1);
       if (std::abs(angle_err) > fine_zone) {
-        angular_vel = std::copysign(config_.max_ang_velocity, angle_err);
+        // Lock the rotation direction on the first bang-bang tick.
+        // Without this, sensor noise near ±π flips the sign of angle_err every tick,
+        // causing the robot to oscillate at max speed and never converge.
+        if (parking_rotation_sign_ == 0.0) {
+          parking_rotation_sign_ = (angle_err >= 0.0) ? 1.0 : -1.0;
+        }
+        angular_vel = parking_rotation_sign_ * config_.max_ang_velocity;
       } else {
+        parking_rotation_sign_ = 0.0;  // release lock; P-controller takes over
         angular_vel = config_.ang_vel_factor * angle_err;  // within [-max, max] by construction
       }
     } else {
+      parking_rotation_sign_ = 0.0;
       angular_vel = 0.0;
     }
     RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 500,
@@ -236,11 +244,14 @@ bool OctoController::isGoalReached(double dist_tolerance, double angle_tolerance
   };
   double current_yaw = yaw_from_quat(current_pose_.pose.orientation);
   double goal_yaw    = yaw_from_quat(goal_pos_.pose.orientation);
-  double angle_err   = std::fmod(std::abs(goal_yaw - current_yaw) + M_PI, 2.0*M_PI) - M_PI;
+  double angle_err   = std::remainder(goal_yaw - current_yaw, 2.0 * M_PI);
 
   // Only enforce angle when the goal carries a non-identity orientation.
   // The A* planner emits identity quaternions (w=1), so angle check is skipped in that case.
-  bool has_goal_orientation = std::abs(goal_pos_.pose.orientation.w - 1.0) > 1e-3;
+  // Check all four components to match the logic in computeVelocityCommands.
+  const auto& gq = goal_pos_.pose.orientation;
+  bool has_goal_orientation = std::abs(gq.w - 1.0) > 1e-3 || std::abs(gq.x) > 1e-3 ||
+                              std::abs(gq.y) > 1e-3        || std::abs(gq.z) > 1e-3;
   bool angle_ok = !has_goal_orientation || std::abs(angle_err) <= angle_tolerance;
 
   return goal_distance <= dist_tolerance && angle_ok;
@@ -252,6 +263,7 @@ bool OctoController::setPlan(const std::vector<geometry_msgs::msg::PoseStamped>&
   goal_pos_ = current_plan_.back(); // Store the goal position
   cancel_requested_ = false;
   pursuit_index_ = 0;
+  parking_rotation_sign_ = 0.0;
   return true;
 }
 
