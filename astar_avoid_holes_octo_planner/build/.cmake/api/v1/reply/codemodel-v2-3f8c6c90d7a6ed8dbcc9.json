@@ -1,0 +1,79 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Debug-92c670b602a441d53008.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.12"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "astar_avoid_holes_octo_planner",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "astar_avoid_holes_octo_planner::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-astar_avoid_holes_octo_planner-Debug-fa78ff0ede80fc4795aa.json",
+					"name" : "astar_avoid_holes_octo_planner",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "astar_avoid_holes_octo_planner_uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-astar_avoid_holes_octo_planner_uninstall-Debug-be51c41c8f430d7f7e1f.json",
+					"name" : "astar_avoid_holes_octo_planner_uninstall",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-uninstall-Debug-11b83be7c53e6858e296.json",
+					"name" : "uninstall",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/david/ros2_ws/src/octo_navigation/astar_avoid_holes_octo_planner/build",
+		"source" : "/home/david/ros2_ws/src/octo_navigation/astar_avoid_holes_octo_planner"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

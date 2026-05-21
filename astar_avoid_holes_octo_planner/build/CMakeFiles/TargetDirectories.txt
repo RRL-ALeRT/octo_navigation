@@ -1,0 +1,10 @@
+/home/david/ros2_ws/src/octo_navigation/astar_avoid_holes_octo_planner/build/CMakeFiles/uninstall.dir
+/home/david/ros2_ws/src/octo_navigation/astar_avoid_holes_octo_planner/build/CMakeFiles/astar_avoid_holes_octo_planner_uninstall.dir
+/home/david/ros2_ws/src/octo_navigation/astar_avoid_holes_octo_planner/build/CMakeFiles/astar_avoid_holes_octo_planner.dir
+/home/david/ros2_ws/src/octo_navigation/astar_avoid_holes_octo_planner/build/CMakeFiles/test.dir
+/home/david/ros2_ws/src/octo_navigation/astar_avoid_holes_octo_planner/build/CMakeFiles/edit_cache.dir
+/home/david/ros2_ws/src/octo_navigation/astar_avoid_holes_octo_planner/build/CMakeFiles/rebuild_cache.dir
+/home/david/ros2_ws/src/octo_navigation/astar_avoid_holes_octo_planner/build/CMakeFiles/list_install_components.dir
+/home/david/ros2_ws/src/octo_navigation/astar_avoid_holes_octo_planner/build/CMakeFiles/install.dir
+/home/david/ros2_ws/src/octo_navigation/astar_avoid_holes_octo_planner/build/CMakeFiles/install/local.dir
+/home/david/ros2_ws/src/octo_navigation/astar_avoid_holes_octo_planner/build/CMakeFiles/install/strip.dir
