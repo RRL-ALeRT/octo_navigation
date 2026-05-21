@@ -6,12 +6,19 @@
 #include <mbf_octo_core/octo_planner.h>
 #include <mbf_octo_core/octo_mapper.h>
 #include <mbf_octo_core/octo_graph_data.h>
+<<<<<<< HEAD
+=======
+#include <mbf_msgs/action/get_path.hpp>
+>>>>>>> 3388536 (clean main push)
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <atomic>
 #include <string>
 #include <vector>
+<<<<<<< HEAD
 #include <octomap_msgs/conversions.h>
+=======
+>>>>>>> 3388536 (clean main push)
 
 
 
@@ -38,6 +45,7 @@ private:
     std::string name_;
     rclcpp::Node::SharedPtr node_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+<<<<<<< HEAD
     rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr octomap_pub_;
     mbf_octo_core::OctoMapper::Ptr mapper_;
     std::atomic_bool cancel_planning_{false};
@@ -63,6 +71,17 @@ private:
         double planning_height);
 
 
+=======
+    mbf_octo_core::OctoMapper::Ptr mapper_;
+    std::atomic_bool cancel_planning_{false};
+    std::string findNearestNode(const std::shared_ptr<mbf_octo_core::GraphData>& graph, const octomap::point3d& query);
+    void createNewNode(const std::shared_ptr<mbf_octo_core::GraphData>& graph, double x, double y, double z);
+    void deleteGraphNodeByID(const std::shared_ptr<mbf_octo_core::GraphData>& graph, std::string id);
+    void deleteGraphNodeByPose(const std::shared_ptr<mbf_octo_core::GraphData>& graph, const octomap::point3d query);
+    void reduceTo2DGraph(std::shared_ptr<mbf_octo_core::GraphData>& graph, double z);
+    void floodFill(std::shared_ptr<mbf_octo_core::GraphData>& graph, std::array<double,3> min_bound, std::array<double,3> max_bound);
+    void flattenPath();
+>>>>>>> 3388536 (clean main push)
 };
 
 } // namespace astar_planner
