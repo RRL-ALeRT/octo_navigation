@@ -1,9 +1,0 @@
-<library path="astar_avoid_holes_octo_planner">
-  <class name="astar_planner/AstarAvoidHolesOctoPlanner"
-         type="astar_planner::AstarAvoidHolesOctoPlanner"
-         base_class_type="mbf_octo_core::OctoPlanner">
-    <description>
-      A* planner that avoids holes using an OctoMap.
-    </description>
-  </class>
-</library>

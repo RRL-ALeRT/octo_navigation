@@ -114,9 +114,7 @@ public:
    *
    * @return true if initialization was successul; else false
    */
-  virtual bool initialize(const std::string& name,
-                          const rclcpp::Node::SharedPtr& node,
-                          const mbf_octo_core::OctoMapper::Ptr& mapper) override;
+  virtual bool initialize(const std::string& plugin_name, const rclcpp::Node::SharedPtr& node) override;
 
 
 protected:

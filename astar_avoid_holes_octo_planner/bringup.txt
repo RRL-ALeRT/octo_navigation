@@ -1,6 +1,0 @@
-ros2 launch webots_spot spot_launch.py
-ros2 launch bring_up_alert_nav alert_nav_launch.py 
-ros2 launch webots_spot mbf_octo_navigation_server_launch.py 
-rviz2 mit alert panel bei add panel und octogrid bei add
-ros2 launch octomap_server octomap_webots_launch.py 
-

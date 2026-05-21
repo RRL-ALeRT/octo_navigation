@@ -142,6 +142,7 @@ uint32_t Astar2dPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
   path_msg.poses  = plan;
   path_pub_->publish(path_msg);
   cost = static_cast<double>(plan.size());
+  return mbf_msgs::action::GetPath::Result::SUCCESS;
   RCLCPP_INFO_STREAM(node_->get_logger(), "Path found with length: " << cost << " steps");
   
   // 6) Do smooth path
@@ -190,7 +191,7 @@ uint32_t Astar2dPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start,
     RCLCPP_INFO_STREAM(node_->get_logger(), "Smooth Path found with length: " << cost << " steps");
   }
 
-  return mbf_msgs::action::GetPath::Result::SUCCESS;
+  // return mbf_msgs::action::GetPath::Result::SUCCESS;
 }
 
 //=============testing function for smooth path=================
@@ -503,11 +504,9 @@ bool Astar2dPlanner::cancel()
 }
 
 //=========================initialize============================
-bool Astar2dPlanner::initialize(const std::string& name,
-                                 const rclcpp::Node::SharedPtr& node,
-                                 const mbf_octo_core::OctoMapper::Ptr& mapper)
+bool Astar2dPlanner::initialize(const std::string& plugin_name, const rclcpp::Node::SharedPtr& node)
 {
-  name_ = name;
+  name_ = plugin_name;
   node_ = node;
   
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
