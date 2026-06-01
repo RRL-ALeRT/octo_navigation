@@ -90,8 +90,7 @@ public:
       const std::vector<geometry_msgs::msg::PoseStamped> & path,
       int index,
       double speed,
-      double lookahead_distance,
-      bool forward);
+      double lookahead_distance);
 
   int pursuit_index_;
 
@@ -146,6 +145,10 @@ private:
   //! flag to handle cancel requests
   std::atomic_bool cancel_requested_;
 
+  // Locked rotation direction for parking mode bang-bang phase: +1 CCW, -1 CW, 0 = unset.
+  // Prevents sign flip at the ±π boundary due to sensor noise.
+  double parking_rotation_sign_ = 0.0;
+
   // handle of callback for changing parameters dynamically
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr reconfiguration_callback_handle_;
 
@@ -153,13 +156,14 @@ private:
 
   struct {
     double max_lin_velocity = 1.0;
-    double max_ang_velocity = 0.5;
+    double max_ang_velocity = 1.0;   // Spot handles 1.0+ rad/s rotation
     double arrival_fading = 0.5;
-    double ang_vel_factor = 1.0;
+    double ang_vel_factor = 6.0;     // fine-alignment zone = max_ang / ang_vel_factor ≈ 0.33 rad
     double lin_vel_factor = 1.0;
     double max_angle = 20.0;
     double max_search_radius = 0.4;
     double max_search_distance = 0.4;
+    bool backward_walking_enable = false;
   } config_;
 };
 

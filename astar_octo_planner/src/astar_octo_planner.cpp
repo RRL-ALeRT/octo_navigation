@@ -195,33 +195,60 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   }
   RCLCPP_INFO(node_->get_logger(), "Planning on graph with %zu nodes.", planning_graph->size());
 
-  // ---- Raycast downward from a point ahead of the robot to find the surface ----
+  // ---- Direction-aware start search: offset toward the goal side, probe floor ----
+  // Shifts the start search XY toward the goal (front or back) by ~half the body
+  // length so the first path node is already on the correct side of the robot.
+  // Floor Z is estimated by raycasting from center + the directional offset; we keep
+  // the highest hit Z (= nearest surface below) to handle variable body height and
+  // inclined terrain. Works even if no voxels exist directly under the robot yet.
   const auto& sq = start.pose.orientation;
   double siny_cosp = 2.0 * (sq.w * sq.z + sq.x * sq.y);
   double cosy_cosp = 1.0 - 2.0 * (sq.y * sq.y + sq.z * sq.z);
   double yaw = std::atan2(siny_cosp, cosy_cosp);
-  const double forward_offset = 0.55;
-  double start_search_x = start_world.x + forward_offset * std::cos(yaw);
-  double start_search_y = start_world.y + forward_offset * std::sin(yaw);
+
+  const double cos_yaw      = std::cos(yaw);
+  const double sin_yaw      = std::sin(yaw);
+  const double probe_offset = 0.55;  // ~half body length, where feet are typically scanned
+
+  // Is the goal in front of or behind the robot?
+  const double goal_dx     = goal_world.x - start_world.x;
+  const double goal_dy     = goal_world.y - start_world.y;
+  const double forward_dot = goal_dx * cos_yaw + goal_dy * sin_yaw;
+  const double sign        = (forward_dot >= 0.0) ? +1.0 : -1.0;  // +1 front, -1 back
+
+  // Start search XY offset toward the goal side
+  double start_search_x = start_world.x + sign * probe_offset * cos_yaw;
+  double start_search_y = start_world.y + sign * probe_offset * sin_yaw;
   double start_search_z = start_world.z;
 
-  octomap::point3d ray_origin(start_search_x, start_search_y, start_search_z);
-  octomap::point3d ray_direction(0.0, 0.0, -1.0);
-  octomap::point3d ray_hit;
-  bool ray_found = octree->castRay(ray_origin, ray_direction, ray_hit,
-                                    /*ignoreUnknownCells=*/true, /*maxRange=*/5.0);
-  if (ray_found) {
-    octomap::OcTreeKey hit_key   = octree->coordToKey(ray_hit);
-    octomap::point3d  hit_center = octree->keyToCoord(hit_key);
-    start_search_x = hit_center.x();
-    start_search_y = hit_center.y();
-    start_search_z = hit_center.z();
-    RCLCPP_INFO(node_->get_logger(),
-      "Raycast hit at (%.3f, %.3f, %.3f) — using as start search point",
-      start_search_x, start_search_y, start_search_z);
-  } else {
-    RCLCPP_WARN(node_->get_logger(),
-      "Downward raycast found no occupied voxel. Falling back to forward-offset point.");
+  // Probe center + directional offset for floor Z; keep the highest Z (nearest floor)
+  double best_floor_z = -std::numeric_limits<double>::infinity();
+  const std::array<std::pair<double,double>, 2> floor_probes = {{
+    { 0.0,                              0.0                             },
+    { sign * probe_offset * cos_yaw,    sign * probe_offset * sin_yaw  },
+  }};
+  const octomap::point3d ray_direction(0.0, 0.0, -1.0);
+  for (const auto& [dx, dy] : floor_probes) {
+    octomap::point3d ray_origin(start_world.x + dx, start_world.y + dy, start_world.z);
+    octomap::point3d ray_hit;
+    bool hit = octree->castRay(ray_origin, ray_direction, ray_hit,
+                                /*ignoreUnknownCells=*/true, /*maxRange=*/5.0);
+    if (hit) {
+      const octomap::point3d hit_center = octree->keyToCoord(octree->coordToKey(ray_hit));
+      if (hit_center.z() > best_floor_z) {
+        best_floor_z   = hit_center.z();
+        start_search_z = hit_center.z();
+      }
+    }
+  }
+
+  RCLCPP_INFO(node_->get_logger(),
+    "Start search: goal is %s (dot=%.2f), offset %s by %.2fm -> search XY=(%.3f,%.3f) Z=%.3f",
+    sign > 0 ? "in front" : "behind", forward_dot,
+    sign > 0 ? "forward" : "backward", probe_offset,
+    start_search_x, start_search_y, start_search_z);
+  if (best_floor_z <= -std::numeric_limits<double>::infinity()) {
+    RCLCPP_WARN(node_->get_logger(), "All floor raycasts missed - using robot pose Z as fallback.");
   }
 
   // ---- Snap start and goal to nearest walkable graph nodes ----
@@ -479,6 +506,11 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
     p.pose.position.z   = gn.center.z();
     p.pose.orientation.w = 1.0;
     plan.push_back(p);
+  }
+  // Propagate the navigation goal's orientation to the last waypoint so the controller
+  // can enforce heading alignment at the goal. All other waypoints keep identity (w=1).
+  if (!plan.empty()) {
+    plan.back().pose.orientation = goal.pose.orientation;
   }
 
   // Publish start/goal markers
