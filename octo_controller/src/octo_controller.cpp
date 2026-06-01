@@ -191,14 +191,18 @@ std::tuple<double, double, int> OctoController::purePursuit(
         double ly = closest_point.second - current_y;
         bool forward = (lx * std::cos(current_heading) + ly * std::sin(current_heading)) >= 0.0;
 
-        v = forward ? speed : -speed;
-
         double target_heading;
         if (forward) {
+            v = speed;
             target_heading = std::atan2(ly, lx);
-        } else {
+        } else if (config_.backward_walking_enable) {
             // Point robot's back toward the target: aim the front in the opposite direction.
+            v = -speed;
             target_heading = std::atan2(-ly, -lx);
+        } else {
+            // Backward walking disabled: rotate in place to face the target first.
+            v = 0.0;
+            target_heading = std::atan2(ly, lx);
         }
         desired_steering_angle = target_heading - current_heading;
     } else {
@@ -207,11 +211,18 @@ std::tuple<double, double, int> OctoController::purePursuit(
         double ly = path.back().pose.position.y - current_y;
         bool forward = (lx * std::cos(current_heading) + ly * std::sin(current_heading)) >= 0.0;
 
-        desired_steering_angle = forward
-            ? std::atan2(ly, lx) - current_heading
-            : std::atan2(-ly, -lx) - current_heading;
+        if (forward) {
+            desired_steering_angle = std::atan2(ly, lx) - current_heading;
+            v = speed;
+        } else if (config_.backward_walking_enable) {
+            desired_steering_angle = std::atan2(-ly, -lx) - current_heading;
+            v = -speed;
+        } else {
+            // Backward walking disabled: rotate in place to face the target first.
+            desired_steering_angle = std::atan2(ly, lx) - current_heading;
+            v = 0.0;
+        }
         index = path.size() - 1;
-        v = forward ? speed : -speed;
     }
 
     // Normalize desired_steering_angle to the range [-pi, pi]
@@ -295,6 +306,8 @@ rcl_interfaces::msg::SetParametersResult OctoController::reconfigureCallback(std
       config_.max_search_radius = parameter.as_double();
     } else if (parameter.get_name() == name_ + ".max_search_distance") {
       config_.max_search_distance = parameter.as_double();
+    } else if (parameter.get_name() == name_ + ".backward_walking_enable") {
+      config_.backward_walking_enable = parameter.as_bool();
     }
   }
 
@@ -382,6 +395,12 @@ bool OctoController::initialize(const std::string& plugin_name,
     range.to_value = 2.0;
     descriptor.floating_point_range.push_back(range);
     config_.max_search_distance = node->declare_parameter(name_ + ".max_search_distance", config_.max_search_distance);
+  }
+  { // backward_walking_enable
+    rcl_interfaces::msg::ParameterDescriptor descriptor;
+    descriptor.description = "If true, the controller may drive in reverse when the lookahead point is behind the robot. "
+                             "If false, the robot rotates in place to face the target first, then drives forward.";
+    config_.backward_walking_enable = node->declare_parameter(name_ + ".backward_walking_enable", config_.backward_walking_enable, descriptor);
   }
 
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(std::bind(

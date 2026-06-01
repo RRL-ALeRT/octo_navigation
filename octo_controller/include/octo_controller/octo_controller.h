@@ -163,6 +163,7 @@ private:
     double max_angle = 20.0;
     double max_search_radius = 0.4;
     double max_search_distance = 0.4;
+    bool backward_walking_enable = false;
   } config_;
 };
 
