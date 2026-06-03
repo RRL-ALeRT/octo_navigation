@@ -577,7 +577,14 @@ void OctoMappingServer::buildConnectivityGraph(double /*eps*/)
     "Graph build: %zu nodes (%zu walkable, %zu stair-step rescued)",
     graph_nodes_.size(), walkable_count, stair_step_count);
 
+  // Phase 3.5: pre-mark stair nodes so Phase 4 can use the extended adjacency radius.
+  // detectAndAugmentStairs writes is_stair_step into graph_nodes_ (persists through Phase 4)
+  // and may also write temporary edges into graph_adj_; Phase 4 clears graph_adj_ before
+  // rebuilding, so those temporary edges are harmless.
+  detectAndAugmentStairs();
+
   // Phase 4: adjacency
+  // Take the snapshot AFTER Phase 3.5 so is_stair_step flags are visible in the snapshot.
   std::vector<std::pair<std::string, GraphNode>> node_snapshot;
   node_snapshot.reserve(graph_nodes_.size());
   for (const auto & kv : graph_nodes_) {
@@ -605,6 +612,10 @@ void OctoMappingServer::buildConnectivityGraph(double /*eps*/)
       const GraphNode & node = node_snapshot[idx].second;
       double multiplier = node.is_stair_step ? stair_adjacency_multiplier_ : 1.8;
       double max_dist_sq = (node.size * multiplier) * (node.size * multiplier);
+      // Horizontal threshold for step-height adjacency.
+      // Using max_step_height_ (default 0.30 m) covers standard stair tread depth
+      // (~0.25 m) so step_adj works even when enable_stair_edges is false.
+      double horiz_sq = max_step_height_ * max_step_height_;
       for (size_t j = 0; j < node_snapshot.size(); ++j) {
         if (j == idx) continue;
         const GraphNode & other = node_snapshot[j].second;
@@ -612,12 +623,17 @@ void OctoMappingServer::buildConnectivityGraph(double /*eps*/)
         double dy = other.center.y() - node.center.y();
         double dz = other.center.z() - node.center.z();
         double dist_sq = dx*dx + dy*dy + dz*dz;
+        double dxy_sq  = dx*dx + dy*dy;
         double effective_max_sq = max_dist_sq;
         if (other.is_stair_step && !node.is_stair_step) {
           double sm = other.size * stair_adjacency_multiplier_;
           effective_max_sq = sm * sm;
         }
-        if (dist_sq <= effective_max_sq) {
+        // Step-height adjacency: horizontally close + Z diff within max_step_height_.
+        // This connects nodes on different surface levels (e.g. a single step down/up)
+        // without requiring them to be within the tight 3D sphere used for flat ground.
+        bool step_adj = dxy_sq <= horiz_sq && std::abs(dz) <= max_step_height_;
+        if (dist_sq <= effective_max_sq || step_adj) {
           add_edge(idx, node_snapshot[j].first);
         }
       }
@@ -811,19 +827,22 @@ void OctoMappingServer::updateConnectivityGraphIncremental(double /*eps*/)
     auto & adj = graph_adj_[node_id];
     double inc_direct_mult = node.is_stair_step ? stair_adjacency_multiplier_ : 1.8;
     double max_dist_sq = (node.size * inc_direct_mult) * (node.size * inc_direct_mult);
+    double horiz_sq    = max_step_height_ * max_step_height_;
 
     for (const auto & [cand_id, cand_node] : all_nodes_snapshot) {
       if (cand_id == node_id) continue;
       double dx = cand_node.center.x() - node.center.x();
       double dy = cand_node.center.y() - node.center.y();
       double dz = cand_node.center.z() - node.center.z();
-      double dsq = dx*dx + dy*dy + dz*dz;
+      double dsq    = dx*dx + dy*dy + dz*dz;
+      double dxy_sq = dx*dx + dy*dy;
       double effective_max = max_dist_sq;
       if (cand_node.is_stair_step && !node.is_stair_step) {
         double sm = cand_node.size * stair_adjacency_multiplier_;
         effective_max = sm * sm;
       }
-      if (dsq > effective_max) continue;
+      bool step_adj = dxy_sq <= horiz_sq && std::abs(dz) <= max_step_height_;
+      if (dsq > effective_max && !step_adj) continue;
       if (std::find(adj.begin(), adj.end(), cand_id) == adj.end())
         adj.push_back(cand_id);
       auto & rev = graph_adj_[cand_id];
@@ -1043,11 +1062,18 @@ size_t OctoMappingServer::revalidateWalkability(
     size_t reclassified_this_pass = 0;
     for (auto & kv : graph->nodes) {
       if (!kv.second.is_walkable) continue;
+      // Stair-step nodes were explicitly promoted to handle tight vertical clearance.
+      // The A* planner already applies max_step_height as an offset when checking them.
+      // Revalidating with the strict wall_proximity_height_ check (no offset) would undo
+      // the promotion every planning cycle, so skip them here.
+      if (kv.second.is_stair_step) continue;
+      // Only re-check vertical clearance against the live octree.
+      // hasFloorSupport is a graph-build concept: lateral neighbor voxels shift as the
+      // rolling local map changes, so re-running it at plan time strips legitimate ramp /
+      // transition nodes and causes spurious walkable rejections in A*.
       bool vc_ok = hasVerticalClearance(kv.second.center, kv.second.size,
                                          wall_proximity_height_);
-      bool fs_ok = vc_ok && hasFloorSupport(kv.second.center.x(), kv.second.center.y(),
-                                             kv.second.center.z(), kv.second.size);
-      if (!vc_ok || !fs_ok) {
+      if (!vc_ok) {
         kv.second.is_walkable = false;
         ++reclassified_this_pass;
         graph->penalty_computed_nodes.erase(kv.first);

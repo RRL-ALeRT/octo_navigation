@@ -329,24 +329,29 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
                 g.center.x(), g.center.y(), g.center.z(), g.is_walkable);
     centers_ok &= valid_center(g.center);
 
-    // Re-snap goal if it fails live vertical clearance
-    if (!hasVerticalClearance(g.center, g.size)) {
+    // Re-snap goal if it is non-walkable or fails live vertical clearance.
+    // Non-walkable goals arise when revalidation strips the snapped node (e.g. transient
+    // occupancy above it in the live map). Search the nearest walkable node that passes
+    // clearance, expanding the XY search radius until one is found.
+    bool goal_needs_resnap = !g.is_walkable || !hasVerticalClearance(g.center, g.size);
+    if (goal_needs_resnap) {
       RCLCPP_WARN(node_->get_logger(),
-        "Goal node fails vertical clearance (robot_height=%.2f). Searching above...",
-        robot_height_);
-      const double xy_tol = active_voxel_size * 3.0;
+        "Goal node is %s (walkable=%d). Searching for nearest walkable alternative...",
+        !g.is_walkable ? "non-walkable" : "clearance-blocked", g.is_walkable);
       double best = std::numeric_limits<double>::infinity();
       std::string alt_id;
-      for (const auto& kv : planning_graph->nodes) {
-        if (!kv.second.is_walkable) continue;
-        double dx = kv.second.center.x() - g.center.x();
-        double dy = kv.second.center.y() - g.center.y();
-        if (std::abs(dx) > xy_tol || std::abs(dy) > xy_tol) continue;
-        if (kv.second.center.z() < g.center.z() - 0.01) continue;
-        if (!hasVerticalClearance(kv.second.center, kv.second.size)) continue;
-        double dz = kv.second.center.z() - g.center.z();
-        double score = dz + 0.1 * std::sqrt(dx*dx + dy*dy);
-        if (score < best) { best = score; alt_id = kv.first; }
+      // Expand search radius until we find something (up to 3 m)
+      for (double xy_tol = active_voxel_size * 3.0; xy_tol <= 3.0 && alt_id.empty(); xy_tol *= 2.0) {
+        for (const auto& kv : planning_graph->nodes) {
+          if (!kv.second.is_walkable) continue;
+          if (!hasVerticalClearance(kv.second.center, kv.second.size)) continue;
+          double dx = kv.second.center.x() - g.center.x();
+          double dy = kv.second.center.y() - g.center.y();
+          double dz = kv.second.center.z() - g.center.z();
+          if (std::abs(dx) > xy_tol || std::abs(dy) > xy_tol) continue;
+          double score = std::abs(dz) + 0.1 * std::sqrt(dx*dx + dy*dy);
+          if (score < best) { best = score; alt_id = kv.first; }
+        }
       }
       if (!alt_id.empty()) {
         const auto& ag = planning_graph->nodes.at(alt_id);
@@ -777,7 +782,11 @@ bool AstarOctoPlanner::hasVerticalClearance(
 
   for (double z = z_start; z <= z_end + 1e-6; z += stepz) {
     octomap::OcTreeNode* nn = octree->search(center.x(), center.y(), z);
-    if (nn && octree->isNodeOccupied(nn)) return false;
+    if (nn && octree->isNodeOccupied(nn)) {
+      // A lone top-surface voxel (nothing above it) is walkable terrain, not a ceiling.
+      octomap::OcTreeNode* above = octree->search(center.x(), center.y(), z + voxel);
+      if (above && octree->isNodeOccupied(above)) return false;
+    }
   }
   return true;
 }
@@ -812,7 +821,12 @@ bool AstarOctoPlanner::hasRadialClearanceAbove(
       double sx = center.x() + robot_radius_ * std::cos(angle);
       double sy = center.y() + robot_radius_ * std::sin(angle);
       octomap::OcTreeNode* nn = octree->search(sx, sy, z);
-      if (nn && octree->isNodeOccupied(nn)) return false;
+      if (nn && octree->isNodeOccupied(nn)) {
+        // Distinguish wall interior (has occupancy above → real obstacle) from
+        // walkable top surface (no occupancy above → terrain, not an obstacle).
+        octomap::OcTreeNode* above = octree->search(sx, sy, z + voxel);
+        if (above && octree->isNodeOccupied(above)) return false;
+      }
     }
   }
   return true;
@@ -847,6 +861,24 @@ bool AstarOctoPlanner::isEdgeCollisionFree(
     double sx         = from.x() + t * (to.x() - from.x());
     double sy         = from.y() + t * (to.y() - from.y());
     double surface_z  = from_top + t * (to_top - from_top);
+
+    // The linear interpolation of surface_z can land inside stair/ramp solid when
+    // the terrain rises faster than the linear ramp (e.g. ascending stairs).  Scan
+    // upward by at most climbable to find the actual surface top.
+    // IMPORTANT: the scan cap must be frozen before the loop.  If surface_z were
+    // used in the loop condition it would grow with each iteration, letting the scan
+    // climb indefinitely through walls and then check above them (empty) — a false
+    // pass.  With a fixed cap, a wall taller than climbable is left partially inside
+    // the adjusted check band and gets detected normally below.
+    {
+      const double scan_cap = surface_z + climbable;
+      for (double sz = surface_z; sz < scan_cap; sz += voxel) {
+        octomap::OcTreeNode* tn = octree->search(sx, sy, sz);
+        if (tn && octree->isNodeOccupied(tn)) surface_z = sz + voxel;
+        else break;
+      }
+    }
+
     const double z_start = surface_z + climbable + 0.01;
     const double z_end   = surface_z + robot_height_;
     if (z_start > z_end + 1e-6) continue;
@@ -857,7 +889,13 @@ bool AstarOctoPlanner::isEdgeCollisionFree(
       double frac    = n_z == 0 ? 0.0 : static_cast<double>(iz) / static_cast<double>(n_z);
       double check_z = z_start + frac * body_band;
       octomap::OcTreeNode* nn = octree->search(sx, sy, check_z);
-      if (nn && octree->isNodeOccupied(nn)) return false;
+      if (nn && octree->isNodeOccupied(nn)) {
+        // Only block if this is a wall interior (has occupancy one voxel higher).
+        // A top-surface voxel (walkable terrain) has nothing above it and should
+        // not count as a collision for the robot body check.
+        octomap::OcTreeNode* above = octree->search(sx, sy, check_z + voxel);
+        if (above && octree->isNodeOccupied(above)) return false;
+      }
     }
   }
   return true;
