@@ -585,34 +585,44 @@ std::string AstarOctoPlanner::findClosestGraphNode(
   const std::shared_ptr<mbf_octo_core::GraphData>& graph) const
 {
   if (!graph || graph->nodes.empty()) return {};
-  const double xy_search_radius = 1.0;
-  double best = std::numeric_limits<double>::infinity();
-  std::string best_id;
 
-  for (const auto& kv : graph->nodes) {
-    if (!kv.second.is_walkable) continue;
-    double dx = kv.second.center.x() - p.x();
-    double dy = kv.second.center.y() - p.y();
-    double dxy_sq = dx*dx + dy*dy;
-    if (dxy_sq > xy_search_radius * xy_search_radius) continue;
-    double node_z = kv.second.center.z();
-    if (node_z > p.z() + max_z_above_query_) continue;
-    double dz    = std::abs(node_z - p.z());
-    double score = dz + 0.1 * std::sqrt(dxy_sq);
-    if (score < best) { best = score; best_id = kv.first; }
-  }
+  // Score: XY proximity is primary, Z proximity is secondary.
+  // Old weight (dz + 0.1*dxy) caused distant-but-same-altitude nodes to beat
+  // the correct floor node at the goal XY.  Swapping weights fixes this.
+  auto score_fn = [](double dxy, double dz) {
+    return dxy + 0.1 * dz;
+  };
 
-  if (best_id.empty()) {
-    // Fallback: unconstrained 3D distance
-    best = std::numeric_limits<double>::infinity();
+  // Search in expanding XY rings so the snap stays as close as possible in XY.
+  for (double xy_r : {0.3, 1.0, 3.0}) {
+    double best = std::numeric_limits<double>::infinity();
+    std::string best_id;
+    const double xy_r_sq = xy_r * xy_r;
     for (const auto& kv : graph->nodes) {
       if (!kv.second.is_walkable) continue;
       double dx = kv.second.center.x() - p.x();
       double dy = kv.second.center.y() - p.y();
-      double dz = kv.second.center.z() - p.z();
-      double d  = dx*dx + dy*dy + dz*dz;
-      if (d < best) { best = d; best_id = kv.first; }
+      double dxy_sq = dx*dx + dy*dy;
+      if (dxy_sq > xy_r_sq) continue;
+      double node_z = kv.second.center.z();
+      if (node_z > p.z() + max_z_above_query_) continue;
+      double dz = std::abs(node_z - p.z());
+      double s  = score_fn(std::sqrt(dxy_sq), dz);
+      if (s < best) { best = s; best_id = kv.first; }
     }
+    if (!best_id.empty()) return best_id;
+  }
+
+  // Last resort: unconstrained 3D (keeps XY-primary scoring).
+  double best = std::numeric_limits<double>::infinity();
+  std::string best_id;
+  for (const auto& kv : graph->nodes) {
+    if (!kv.second.is_walkable) continue;
+    double dx = kv.second.center.x() - p.x();
+    double dy = kv.second.center.y() - p.y();
+    double dz = std::abs(kv.second.center.z() - p.z());
+    double s  = score_fn(std::sqrt(dx*dx + dy*dy), dz);
+    if (s < best) { best = s; best_id = kv.first; }
   }
   return best_id;
 }
@@ -782,11 +792,7 @@ bool AstarOctoPlanner::hasVerticalClearance(
 
   for (double z = z_start; z <= z_end + 1e-6; z += stepz) {
     octomap::OcTreeNode* nn = octree->search(center.x(), center.y(), z);
-    if (nn && octree->isNodeOccupied(nn)) {
-      // A lone top-surface voxel (nothing above it) is walkable terrain, not a ceiling.
-      octomap::OcTreeNode* above = octree->search(center.x(), center.y(), z + voxel);
-      if (above && octree->isNodeOccupied(above)) return false;
-    }
+    if (nn && octree->isNodeOccupied(nn)) return false;
   }
   return true;
 }
@@ -821,12 +827,7 @@ bool AstarOctoPlanner::hasRadialClearanceAbove(
       double sx = center.x() + robot_radius_ * std::cos(angle);
       double sy = center.y() + robot_radius_ * std::sin(angle);
       octomap::OcTreeNode* nn = octree->search(sx, sy, z);
-      if (nn && octree->isNodeOccupied(nn)) {
-        // Distinguish wall interior (has occupancy above → real obstacle) from
-        // walkable top surface (no occupancy above → terrain, not an obstacle).
-        octomap::OcTreeNode* above = octree->search(sx, sy, z + voxel);
-        if (above && octree->isNodeOccupied(above)) return false;
-      }
+      if (nn && octree->isNodeOccupied(nn)) return false;
     }
   }
   return true;
@@ -865,18 +866,25 @@ bool AstarOctoPlanner::isEdgeCollisionFree(
     // The linear interpolation of surface_z can land inside stair/ramp solid when
     // the terrain rises faster than the linear ramp (e.g. ascending stairs).  Scan
     // upward by at most climbable to find the actual surface top.
-    // IMPORTANT: the scan cap must be frozen before the loop.  If surface_z were
-    // used in the loop condition it would grow with each iteration, letting the scan
-    // climb indefinitely through walls and then check above them (empty) — a false
-    // pass.  With a fixed cap, a wall taller than climbable is left partially inside
-    // the adjusted check band and gets detected normally below.
+    // Terrain-following scan: if the linear surface_z lands inside a thin solid
+    // (stair riser, ramp body), advance surface_z to its top so the body check
+    // starts above it.  The scan is capped at surface_z + climbable (frozen before
+    // the loop) so it cannot climb through walls.
+    // Key: only apply the adjustment if we found empty space within the cap
+    // (meaning the solid ended — it's thin terrain).  If all checked positions were
+    // solid (scan hit the cap), the object is thicker than climbable → treat as a
+    // wall, keep original surface_z so the body check starts inside it and detects it.
     {
-      const double scan_cap = surface_z + climbable;
+      const double scan_cap   = surface_z + climbable;
+      double       adj_sz     = surface_z;
+      bool         found_empty = false;
       for (double sz = surface_z; sz < scan_cap; sz += voxel) {
         octomap::OcTreeNode* tn = octree->search(sx, sy, sz);
-        if (tn && octree->isNodeOccupied(tn)) surface_z = sz + voxel;
-        else break;
+        if (tn && octree->isNodeOccupied(tn)) adj_sz = sz + voxel;
+        else { found_empty = true; break; }
       }
+      if (found_empty) surface_z = adj_sz;  // thin terrain — adjust up
+      // else: thick solid (wall) — leave surface_z as-is so check falls inside it
     }
 
     const double z_start = surface_z + climbable + 0.01;
@@ -889,13 +897,7 @@ bool AstarOctoPlanner::isEdgeCollisionFree(
       double frac    = n_z == 0 ? 0.0 : static_cast<double>(iz) / static_cast<double>(n_z);
       double check_z = z_start + frac * body_band;
       octomap::OcTreeNode* nn = octree->search(sx, sy, check_z);
-      if (nn && octree->isNodeOccupied(nn)) {
-        // Only block if this is a wall interior (has occupancy one voxel higher).
-        // A top-surface voxel (walkable terrain) has nothing above it and should
-        // not count as a collision for the robot body check.
-        octomap::OcTreeNode* above = octree->search(sx, sy, check_z + voxel);
-        if (above && octree->isNodeOccupied(above)) return false;
-      }
+      if (nn && octree->isNodeOccupied(nn)) return false;
     }
   }
   return true;
