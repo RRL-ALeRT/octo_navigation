@@ -13,7 +13,10 @@
 #include <string>
 #include <vector>
 #include <octomap_msgs/conversions.h>
+<<<<<<< HEAD
 #include <octomap_msgs/conversions.h>
+=======
+>>>>>>> 0ec5fd3 (switch to desktop)
 
 
 
