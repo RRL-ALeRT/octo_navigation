@@ -58,14 +58,8 @@ uint32_t AstarAvoidHolesOctoPlanner::makePlan(
         message = "No walkable goal node found";
         return 50;
     }
-    RCLCPP_INFO(node_->get_logger(), "map wird umgebaut");
-    RCLCPP_INFO(node_->get_logger(), "nodes vor reduce: %zu", graph->nodes.size());
-
     reduceTo2DGraph(graph, planning_height);
-    RCLCPP_INFO(node_->get_logger(), "nodes nach reduce: %zu", graph->nodes.size());
     floodFill(graph, min_b, max_b);
-
-    RCLCPP_INFO(node_->get_logger(), "nodes nach floodFill: %zu", graph->nodes.size());
     for (auto& [id, _] : graph->nodes)
         graph->node_penalty[id] = 0.0;
     inflateLevel(graph);
@@ -125,6 +119,8 @@ uint32_t AstarAvoidHolesOctoPlanner::makePlan(
     std::reverse(path_nodes.begin(), path_nodes.end());
 
     nav_msgs::msg::Path path;
+    path.header.stamp = node_->get_clock()->now();
+    path.header.frame_id = "map";
     for (const auto & pid : path_nodes) {
         geometry_msgs::msg::PoseStamped pose;
         pose.header.frame_id = frame;
@@ -135,7 +131,7 @@ uint32_t AstarAvoidHolesOctoPlanner::makePlan(
         pose.pose.orientation.w = 1.0;
         plan.push_back(pose);
         path.poses.push_back(pose);
-    }
+    } 
     path_pub_->publish(path);
     cost = g_score[goal_node];
     std::stringstream ss;
@@ -210,7 +206,7 @@ void AstarAvoidHolesOctoPlanner::inflateLevel(
     while (!frontier.empty()) {
         std::set<std::string> next;
         for (const auto& id : frontier) {
-            graph->node_penalty[id] = 10000.0 / std::pow(2.0, step);
+            graph->node_penalty[id] = 10000.0 / std::pow(1.2, step);
             for (const auto& nid : graph->adj[id])
                 if (graph->nodes[nid].is_walkable && !inflated.count(nid))
                     next.insert(nid);
@@ -235,7 +231,7 @@ bool AstarAvoidHolesOctoPlanner::initialize(
     name_ = name;
     node_ = node;
     mapper_ = mapper;
-    path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("plan", 1);
+    path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("~/path", 1);
     octomap_pub_ = node_->create_publisher<octomap_msgs::msg::Octomap>("graph_octomap", 1);
     penalty_pub_ = node_->create_publisher<octomap_msgs::msg::Octomap>("penalty_octomap", 1);
     return true;
