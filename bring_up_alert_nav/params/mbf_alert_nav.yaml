@@ -10,7 +10,7 @@ move_base_flex:
 
     planners: ['octo_planner']
     octo_planner:
-      type: 'astar_octo_planner/AstarOctoPlanner'
+      type: 'astar_planner/AstarAvoidHolesOctoPlanner'
       cost_limit: 0.8
       publish_vector_field: true
       robot_radius: 0.0
