@@ -4,6 +4,7 @@ move_base_flex:
     robot_frame: 'base_link'
     odom_topic: '/odometry'
     octomap_topic: '/octomap_binary_local'
+
     use_sim_time: false
     force_stop_at_goal: true
     force_stop_on_cancel: true
