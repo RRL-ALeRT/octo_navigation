@@ -329,24 +329,29 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
                 g.center.x(), g.center.y(), g.center.z(), g.is_walkable);
     centers_ok &= valid_center(g.center);
 
-    // Re-snap goal if it fails live vertical clearance
-    if (!hasVerticalClearance(g.center, g.size)) {
+    // Re-snap goal if it is non-walkable or fails live vertical clearance.
+    // Non-walkable goals arise when revalidation strips the snapped node (e.g. transient
+    // occupancy above it in the live map). Search the nearest walkable node that passes
+    // clearance, expanding the XY search radius until one is found.
+    bool goal_needs_resnap = !g.is_walkable || !hasVerticalClearance(g.center, g.size);
+    if (goal_needs_resnap) {
       RCLCPP_WARN(node_->get_logger(),
-        "Goal node fails vertical clearance (robot_height=%.2f). Searching above...",
-        robot_height_);
-      const double xy_tol = active_voxel_size * 3.0;
+        "Goal node is %s (walkable=%d). Searching for nearest walkable alternative...",
+        !g.is_walkable ? "non-walkable" : "clearance-blocked", g.is_walkable);
       double best = std::numeric_limits<double>::infinity();
       std::string alt_id;
-      for (const auto& kv : planning_graph->nodes) {
-        if (!kv.second.is_walkable) continue;
-        double dx = kv.second.center.x() - g.center.x();
-        double dy = kv.second.center.y() - g.center.y();
-        if (std::abs(dx) > xy_tol || std::abs(dy) > xy_tol) continue;
-        if (kv.second.center.z() < g.center.z() - 0.01) continue;
-        if (!hasVerticalClearance(kv.second.center, kv.second.size)) continue;
-        double dz = kv.second.center.z() - g.center.z();
-        double score = dz + 0.1 * std::sqrt(dx*dx + dy*dy);
-        if (score < best) { best = score; alt_id = kv.first; }
+      // Expand search radius until we find something (up to 3 m)
+      for (double xy_tol = active_voxel_size * 3.0; xy_tol <= 3.0 && alt_id.empty(); xy_tol *= 2.0) {
+        for (const auto& kv : planning_graph->nodes) {
+          if (!kv.second.is_walkable) continue;
+          if (!hasVerticalClearance(kv.second.center, kv.second.size)) continue;
+          double dx = kv.second.center.x() - g.center.x();
+          double dy = kv.second.center.y() - g.center.y();
+          double dz = kv.second.center.z() - g.center.z();
+          if (std::abs(dx) > xy_tol || std::abs(dy) > xy_tol) continue;
+          double score = std::abs(dz) + 0.1 * std::sqrt(dx*dx + dy*dy);
+          if (score < best) { best = score; alt_id = kv.first; }
+        }
       }
       if (!alt_id.empty()) {
         const auto& ag = planning_graph->nodes.at(alt_id);
@@ -580,34 +585,44 @@ std::string AstarOctoPlanner::findClosestGraphNode(
   const std::shared_ptr<mbf_octo_core::GraphData>& graph) const
 {
   if (!graph || graph->nodes.empty()) return {};
-  const double xy_search_radius = 1.0;
-  double best = std::numeric_limits<double>::infinity();
-  std::string best_id;
 
-  for (const auto& kv : graph->nodes) {
-    if (!kv.second.is_walkable) continue;
-    double dx = kv.second.center.x() - p.x();
-    double dy = kv.second.center.y() - p.y();
-    double dxy_sq = dx*dx + dy*dy;
-    if (dxy_sq > xy_search_radius * xy_search_radius) continue;
-    double node_z = kv.second.center.z();
-    if (node_z > p.z() + max_z_above_query_) continue;
-    double dz    = std::abs(node_z - p.z());
-    double score = dz + 0.1 * std::sqrt(dxy_sq);
-    if (score < best) { best = score; best_id = kv.first; }
-  }
+  // Score: XY proximity is primary, Z proximity is secondary.
+  // Old weight (dz + 0.1*dxy) caused distant-but-same-altitude nodes to beat
+  // the correct floor node at the goal XY.  Swapping weights fixes this.
+  auto score_fn = [](double dxy, double dz) {
+    return dxy + 0.1 * dz;
+  };
 
-  if (best_id.empty()) {
-    // Fallback: unconstrained 3D distance
-    best = std::numeric_limits<double>::infinity();
+  // Search in expanding XY rings so the snap stays as close as possible in XY.
+  for (double xy_r : {0.3, 1.0, 3.0}) {
+    double best = std::numeric_limits<double>::infinity();
+    std::string best_id;
+    const double xy_r_sq = xy_r * xy_r;
     for (const auto& kv : graph->nodes) {
       if (!kv.second.is_walkable) continue;
       double dx = kv.second.center.x() - p.x();
       double dy = kv.second.center.y() - p.y();
-      double dz = kv.second.center.z() - p.z();
-      double d  = dx*dx + dy*dy + dz*dz;
-      if (d < best) { best = d; best_id = kv.first; }
+      double dxy_sq = dx*dx + dy*dy;
+      if (dxy_sq > xy_r_sq) continue;
+      double node_z = kv.second.center.z();
+      if (node_z > p.z() + max_z_above_query_) continue;
+      double dz = std::abs(node_z - p.z());
+      double s  = score_fn(std::sqrt(dxy_sq), dz);
+      if (s < best) { best = s; best_id = kv.first; }
     }
+    if (!best_id.empty()) return best_id;
+  }
+
+  // Last resort: unconstrained 3D (keeps XY-primary scoring).
+  double best = std::numeric_limits<double>::infinity();
+  std::string best_id;
+  for (const auto& kv : graph->nodes) {
+    if (!kv.second.is_walkable) continue;
+    double dx = kv.second.center.x() - p.x();
+    double dy = kv.second.center.y() - p.y();
+    double dz = std::abs(kv.second.center.z() - p.z());
+    double s  = score_fn(std::sqrt(dx*dx + dy*dy), dz);
+    if (s < best) { best = s; best_id = kv.first; }
   }
   return best_id;
 }
@@ -847,6 +862,31 @@ bool AstarOctoPlanner::isEdgeCollisionFree(
     double sx         = from.x() + t * (to.x() - from.x());
     double sy         = from.y() + t * (to.y() - from.y());
     double surface_z  = from_top + t * (to_top - from_top);
+
+    // The linear interpolation of surface_z can land inside stair/ramp solid when
+    // the terrain rises faster than the linear ramp (e.g. ascending stairs).  Scan
+    // upward by at most climbable to find the actual surface top.
+    // Terrain-following scan: if the linear surface_z lands inside a thin solid
+    // (stair riser, ramp body), advance surface_z to its top so the body check
+    // starts above it.  The scan is capped at surface_z + climbable (frozen before
+    // the loop) so it cannot climb through walls.
+    // Key: only apply the adjustment if we found empty space within the cap
+    // (meaning the solid ended — it's thin terrain).  If all checked positions were
+    // solid (scan hit the cap), the object is thicker than climbable → treat as a
+    // wall, keep original surface_z so the body check starts inside it and detects it.
+    {
+      const double scan_cap   = surface_z + climbable;
+      double       adj_sz     = surface_z;
+      bool         found_empty = false;
+      for (double sz = surface_z; sz < scan_cap; sz += voxel) {
+        octomap::OcTreeNode* tn = octree->search(sx, sy, sz);
+        if (tn && octree->isNodeOccupied(tn)) adj_sz = sz + voxel;
+        else { found_empty = true; break; }
+      }
+      if (found_empty) surface_z = adj_sz;  // thin terrain — adjust up
+      // else: thick solid (wall) — leave surface_z as-is so check falls inside it
+    }
+
     const double z_start = surface_z + climbable + 0.01;
     const double z_end   = surface_z + robot_height_;
     if (z_start > z_end + 1e-6) continue;
