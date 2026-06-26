@@ -59,12 +59,12 @@ uint32_t AstarAvoidHolesOctoPlanner::makePlan(
         return 50;
     }
     reduceTo2DGraph(graph, planning_height);
-    floodFill(graph, min_b, max_b);
     for (auto& [id, _] : graph->nodes)
         graph->node_penalty[id] = 0.0;
-    inflateLevel(graph);
     publishGraphAsOctomap(graph,"map");
-    RCLCPP_INFO(node_->get_logger(), "map wurde umgebaut");
+    publishPenaltyMap(graph, "map", pre_fill_penalty_pub_);
+    fillSingleHoles(graph, planning_height);
+    inflateLevel(graph);
 
     std::priority_queue<std::pair<double,std::string>, std::vector<std::pair<double,std::string>>, std::greater<std::pair<double,std::string>>> open_set; 
     std::unordered_map<std::string, double> g_score;
@@ -138,7 +138,7 @@ uint32_t AstarAvoidHolesOctoPlanner::makePlan(
     ss << cost;
     const char* str = ss.str().c_str();
     RCLCPP_INFO(node_->get_logger(), str);
-    publishPenaltyMap(graph, "map");
+    publishPenaltyMap(graph, "map", penalty_pub_);
     message = "A* plan created successfully";
     return 0;
 }
@@ -152,13 +152,6 @@ void AstarAvoidHolesOctoPlanner::publishGraphAsOctomap(
     double voxel_size = mapper_->getVoxelSize();
     RCLCPP_INFO(node_->get_logger(), "voxel_size: %f", mapper_->getVoxelSize());
 
-// Ersten paar Node-Koordinaten ausgeben:
-    int count = 0;
-    for (const auto& [id, node] : graph->nodes) {
-        if (count++ > 5) break;
-        RCLCPP_INFO(node_->get_logger(), "node: x=%f y=%f z=%f walkable=%d",
-            node.center.x(), node.center.y(), node.center.z(), node.is_walkable);
-    }
     octomap::OcTree tree(voxel_size);
 
     for (const auto& [id, node] : graph->nodes) {
@@ -171,8 +164,6 @@ void AstarAvoidHolesOctoPlanner::publishGraphAsOctomap(
     msg.header.frame_id = frame;
     msg.header.stamp = node_->get_clock()->now();
 
-    RCLCPP_INFO(node_->get_logger(), "Octomap tree size: %zu", tree.size());
-    RCLCPP_INFO(node_->get_logger(), "walkable nodes: %zu", graph->nodes.size());
     if (!octomap_msgs::binaryMapToMsg(tree, msg)) {
         RCLCPP_ERROR(node_->get_logger(), "binaryMapToMsg fehlgeschlagen!");
         return;
@@ -181,23 +172,99 @@ void AstarAvoidHolesOctoPlanner::publishGraphAsOctomap(
     octomap_pub_->publish(msg);
 }
 
+void AstarAvoidHolesOctoPlanner::fillSingleHoles(
+    std::shared_ptr<mbf_octo_core::GraphData>& graph,
+    double planning_height)
+{
+    double vs = mapper_->getVoxelSize();
+    double tol = vs * 0.6;
+
+    // Alle vorhandenen Positionen indexieren
+    std::unordered_map<std::string, octomap::point3d> positions;
+    for (const auto& [id, node] : graph->nodes)
+        if (node.is_walkable)
+            positions[id] = node.center;
+
+    // 8 Nachbar-Offsets
+    std::vector<std::pair<double,double>> offsets = {
+        {-vs,-vs},{0,-vs},{vs,-vs},
+        {-vs, 0},         {vs, 0},
+        {-vs, vs},{0, vs},{vs, vs}
+    };
+
+    std::vector<octomap::point3d> to_create;
+
+    for (const auto& [id, pos] : positions) {
+        if (graph->adj[id].size() < 7) continue;  // zu viele fehlen
+
+        for (const auto& [ox, oy] : offsets) {
+            double tx = pos.x() + ox;
+            double ty = pos.y() + oy;
+
+            // Gibt es bereits einen Node an dieser Position?
+            bool found = false;
+            for (const auto& nid : graph->adj[id]) {
+                auto& np = graph->nodes[nid].center;
+                if (std::abs(np.x() - tx) < tol && std::abs(np.y() - ty) < tol) {
+                    found = true; break;
+                }
+            }
+            if (!found)
+                to_create.push_back({tx, ty, planning_height});
+        }
+    }
+    for (const auto& p : to_create) {
+    RCLCPP_INFO(node_->get_logger(), "Creating node at: %f %f %f", p.x(), p.y(), p.z());
+    std::string new_id = createNewNode(graph, p.x(), p.y(), p.z());
+    
+    // Sicherstellen dass adj-Eintrag existiert
+    if (graph->adj.find(new_id) == graph->adj.end())
+        graph->adj[new_id] = {};
+    
+    for (const auto& [existing_id, existing_pos] : positions) {
+        double dx = std::abs(p.x() - existing_pos.x());
+        double dy = std::abs(p.y() - existing_pos.y());
+        if (dx <= vs + tol && dy <= vs + tol) {
+            // Sicherstellen dass existing adj-Eintrag existiert
+            if (graph->adj.find(existing_id) == graph->adj.end())
+                graph->adj[existing_id] = {};
+            graph->adj[new_id].push_back(existing_id);
+            graph->adj[existing_id].push_back(new_id);
+        }
+    }
+    positions[new_id] = p;
+}
+}
+
 void AstarAvoidHolesOctoPlanner::inflateLevel(
     std::shared_ptr<mbf_octo_core::GraphData>& graph)
 {
+    double voxel_size = mapper_->getVoxelSize();
     std::set<std::string> frontier;
     std::set<std::string> inflated;
     int step = 1;
 
-    // Rand-Nodes: walkable, aber nicht alle 8 Nachbarn walkable
     for (const auto& [id, node] : graph->nodes) {
         if (!node.is_walkable) continue;
-        
-        int walkable_neighbors = 0;
-        for (const auto& nid : graph->adj[id])
-            if (graph->nodes[nid].is_walkable)
-                walkable_neighbors++;
-        
-        if (walkable_neighbors < 8)  // oder < graph->adj[id].size()
+
+        bool is_boundary = false;
+
+        // 1) Nachbar existiert nicht im Graph (= Loch oder Kartenrand)
+        if (graph->adj[id].size() < 8) {
+            is_boundary = true;
+        }
+
+        // 2) Nachbar existiert, ist aber nicht walkable
+        if (!is_boundary) {
+            for (const auto& nid : graph->adj[id]) {
+                if (!graph->nodes[nid].is_walkable) {
+                    is_boundary = true;
+                    break;
+                }
+            }
+        }
+
+        if (is_boundary)
             frontier.insert(id);
     }
 
@@ -205,12 +272,13 @@ void AstarAvoidHolesOctoPlanner::inflateLevel(
 
     while (!frontier.empty()) {
         std::set<std::string> next;
-        for (const auto& id : frontier) {
-            graph->node_penalty[id] = 10000.0 / std::pow(1.2, step);
-            for (const auto& nid : graph->adj[id])
+        for (const auto& fid : frontier) {
+            graph->node_penalty[fid] = 30000.0 / std::pow(2.0, step);
+            for (const auto& nid : graph->adj[fid]) {
                 if (graph->nodes[nid].is_walkable && !inflated.count(nid))
                     next.insert(nid);
-            inflated.insert(id);
+            }
+            inflated.insert(fid);
         }
         frontier = next;
         step++;
@@ -234,12 +302,13 @@ bool AstarAvoidHolesOctoPlanner::initialize(
     path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("~/path", 1);
     octomap_pub_ = node_->create_publisher<octomap_msgs::msg::Octomap>("graph_octomap", 1);
     penalty_pub_ = node_->create_publisher<octomap_msgs::msg::Octomap>("penalty_octomap", 1);
+    pre_fill_penalty_pub_ = node_->create_publisher<octomap_msgs::msg::Octomap>("pre_fill_penalty_octomap", 1);
     return true;
 }
 
 void AstarAvoidHolesOctoPlanner::publishPenaltyMap(
     const std::shared_ptr<mbf_octo_core::GraphData>& graph,
-    const std::string& frame)
+    const std::string& frame, const std::shared_ptr<rclcpp::Publisher<octomap_msgs::msg::Octomap>>& pub)
 {
     double voxel_size = mapper_->getVoxelSize();
     octomap::ColorOcTree tree(voxel_size);
@@ -249,9 +318,15 @@ void AstarAvoidHolesOctoPlanner::publishPenaltyMap(
         auto* n = tree.updateNode(node.center, true);
         
         double penalty = graph->node_penalty.count(id) ? graph->node_penalty.at(id) : 0.0;
+        RCLCPP_INFO(node_->get_logger(), "Node %s penalty: %f", id.c_str(), penalty);
         // Penalty auf Farbe mappen: 0 = grün, hoch = rot
-        uint8_t r = std::min(255.0, penalty * 5.0);
-        uint8_t g = std::max(0.0, 255.0 - penalty * 5.0);
+
+        uint8_t r = static_cast<uint8_t>(std::min(255.0, penalty / 5.0));
+        uint8_t g = static_cast<uint8_t>(std::max(0.0, 255.0 - penalty / 5.0));
+
+        RCLCPP_INFO(node_->get_logger(), "Node %s red: %d",   id.c_str(), static_cast<int>(r));
+        RCLCPP_INFO(node_->get_logger(), "Node %s green: %d", id.c_str(), static_cast<int>(g));
+        
         n->setColor(r, g, 0);
     }
     tree.updateInnerOccupancy();
@@ -260,10 +335,10 @@ void AstarAvoidHolesOctoPlanner::publishPenaltyMap(
     msg.header.frame_id = frame;
     msg.header.stamp = node_->get_clock()->now();
     octomap_msgs::fullMapToMsg(tree, msg);  // full statt binary für Farben
-    penalty_pub_->publish(msg);
+    pub->publish(msg);
 }
 
-void AstarAvoidHolesOctoPlanner::createNewNode(
+std::string AstarAvoidHolesOctoPlanner::createNewNode(
     const std::shared_ptr<mbf_octo_core::GraphData>& graph,
     double x, double y, double z)
 {
@@ -272,9 +347,17 @@ void AstarAvoidHolesOctoPlanner::createNewNode(
     new_node.is_walkable = true;
     new_node.is_stair_step = false;
     new_node.size = mapper_->getVoxelSize();
-    std::string new_id = new_node.id();
+
+    char idbuf[128];
+    int ix_mm = static_cast<int>(std::round(x * 1000.0));
+    int iy_mm = static_cast<int>(std::round(y * 1000.0));
+    int iz_mm = static_cast<int>(std::round(z * 1000.0));
+    std::snprintf(idbuf, sizeof(idbuf), "c_%d_%d_%d", ix_mm, iy_mm, iz_mm);
+    std::string new_id(idbuf);
+
     graph->nodes[new_id] = new_node;
     graph->node_penalty[new_id] = 0.0;
+    return new_id;
 }
 
 std::string AstarAvoidHolesOctoPlanner::findNearestNode(
@@ -336,50 +419,6 @@ void AstarAvoidHolesOctoPlanner::reduceTo2DGraph(
     }
 }
 
-void AstarAvoidHolesOctoPlanner::floodFill(
-    std::shared_ptr<mbf_octo_core::GraphData>& graph,
-    std::array<double,3> min_bound,
-    std::array<double,3> max_bound)
-{
-    // Start von einem walkable Randknoten
-    std::string start_id;
-    double best_dist = std::numeric_limits<double>::max();
-    octomap::point3d center(
-        (min_bound[0] + max_bound[0]) / 2.0,
-        (min_bound[1] + max_bound[1]) / 2.0,
-        min_bound[2]);
-
-    for (const auto& [id, node] : graph->nodes) {
-        if (!node.is_walkable) continue;
-        double dx = node.center.x() - center.x();
-        double dy = node.center.y() - center.y();
-        double d = dx*dx + dy*dy;
-        if (d < best_dist) { best_dist = d; start_id = id; }
-    }
-
-    if (start_id.empty()) return;
-
-    // Flood von walkable start node aus
-    std::queue<std::string> q;
-    std::set<std::string> visited;
-    q.push(start_id);
-    visited.insert(start_id);
-
-    while (!q.empty()) {
-        std::string id = q.front(); q.pop();
-        for (const auto & neighbor_id : graph->adj[id]) {
-            if (visited.count(neighbor_id)) continue;
-            visited.insert(neighbor_id);
-            if (graph->nodes[neighbor_id].is_walkable)
-                q.push(neighbor_id);
-        }
-    }
-
-    // Nicht erreichbare walkable Nodes = Löcher → unwalkable
-    for (auto & [id, node] : graph->nodes)
-        if (node.is_walkable && !visited.count(id))
-            node.is_walkable = false;
-}
 
 } // namespace astar_planner
 

@@ -6,7 +6,6 @@
 #include <mbf_octo_core/octo_planner.h>
 #include <mbf_octo_core/octo_mapper.h>
 #include <mbf_octo_core/octo_graph_data.h>
-#include <mbf_msgs/action/get_path.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <atomic>
@@ -44,12 +43,11 @@ private:
     std::atomic_bool cancel_planning_{false};
     std::string findNearestNode(const std::shared_ptr<mbf_octo_core::GraphData>& graph, const octomap::point3d& query);
     rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr penalty_pub_;
-    void createNewNode(const std::shared_ptr<mbf_octo_core::GraphData>& graph, double x, double y, double z);
+    rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr pre_fill_penalty_pub_;
+    std::string createNewNode(const std::shared_ptr<mbf_octo_core::GraphData>& graph, double x, double y, double z);
     void deleteGraphNodeByID(const std::shared_ptr<mbf_octo_core::GraphData>& graph, std::string id);
     void deleteGraphNodeByPose(const std::shared_ptr<mbf_octo_core::GraphData>& graph, const octomap::point3d query);
     void reduceTo2DGraph(std::shared_ptr<mbf_octo_core::GraphData>& graph, double z);
-    void floodFill(std::shared_ptr<mbf_octo_core::GraphData>& graph, std::array<double,3> min_bound, std::array<double,3> max_bound);
-    void flattenPath();
     void inflateLevel(std::shared_ptr<mbf_octo_core::GraphData>& graph);
     void publishGraphAsOctomap(
         const std::shared_ptr<mbf_octo_core::GraphData>& graph,
@@ -57,8 +55,12 @@ private:
     );
     void publishPenaltyMap(
         const std::shared_ptr<mbf_octo_core::GraphData>& graph,
-        const std::string& frame
+        const std::string& frame,
+        const std::shared_ptr<rclcpp::Publisher<octomap_msgs::msg::Octomap>>& pub
     );
+    void fillSingleHoles(
+        std::shared_ptr<mbf_octo_core::GraphData>& graph,
+        double planning_height);
 
 
 };

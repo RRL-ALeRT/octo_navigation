@@ -1,0 +1,11 @@
+# Request
+# Minimale Cluster-Größe (Anzahl Voxel) - Cluster kleiner als das werden ignoriert
+int32 min_cluster_size
+---
+# Response
+bool success
+string message
+
+# Alle gefundenen Frontier-Cluster, sortiert nach Größe (größter zuerst)
+geometry_msgs/PoseStamped[] frontier_centroids
+int32[] cluster_sizes
