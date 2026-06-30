@@ -15,19 +15,15 @@ find_package(pluginlib REQUIRED)
 find_package(octomap REQUIRED)
 find_package(octomap_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
-<<<<<<< HEAD
 find_package(geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
-=======
->>>>>>> 3388536 (clean main push)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
 
 
-<<<<<<< HEAD
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/FindFrontiers.srv"
   DEPENDENCIES geometry_msgs
@@ -41,18 +37,6 @@ target_compile_features(avoid_holes_planner_plugin PUBLIC c_std_99 cxx_std_17)  
 
 ament_target_dependencies(
 avoid_holes_planner_plugin  
-=======
-
-
-add_Library(astar_avoid_holes_octo_planner SHARED src/astar_avoid_holes_octo_planner.cpp)
-target_include_directories(astar_avoid_holes_octo_planner PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
-target_compile_features(astar_avoid_holes_octo_planner PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
-
-ament_target_dependencies(
-astar_avoid_holes_octo_planner  
->>>>>>> 3388536 (clean main push)
 rclcpp
 mbf_octo_core
 mbf_msgs
@@ -60,42 +44,27 @@ mbf_utility
 pluginlib
 octomap
 octomap_msgs
-<<<<<<< HEAD
 visualization_msgs
 geometry_msgs
 tf2_ros
 tf2_geometry_msgs)
 pluginlib_export_plugin_description_file(mbf_octo_core plugins.xml)
 target_include_directories(avoid_holes_planner_plugin PUBLIC
-=======
-visualization_msgs)
-pluginlib_export_plugin_description_file(mbf_octo_core plugins.xml)
-target_include_directories(astar_avoid_holes_octo_planner PUBLIC
->>>>>>> 3388536 (clean main push)
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${rclcpp_INCLUDE_DIRS}
 )
 
-<<<<<<< HEAD
 target_link_libraries(avoid_holes_planner_plugin
   ${octomap_LIBRARIES}
 )
 
 install(TARGETS avoid_holes_planner_plugin
-=======
-target_link_libraries(astar_avoid_holes_octo_planner
-  ${octomap_LIBRARIES}
-)
-
-install(TARGETS astar_avoid_holes_octo_planner
->>>>>>> 3388536 (clean main push)
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
   )
 
-<<<<<<< HEAD
   add_executable(frontier_server src/frontier_server.cpp)
 
   target_include_directories(frontier_server PUBLIC
@@ -150,8 +119,6 @@ install(TARGETS astar_avoid_holes_octo_planner
     DESTINATION lib/${PROJECT_NAME}
   )
 
-=======
->>>>>>> 3388536 (clean main push)
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights

@@ -401,7 +401,7 @@ void AstarAvoidHolesOctoPlanner::reduceTo2DGraph(
 {
     std::unordered_set<std::string> keep;
     for (const auto& [id, node] : graph->nodes)
-        if (std::abs(node.center.z() - z) <= 0.001)
+        if (std::abs(node.center.z() >= z))
             keep.insert(id);
 
     for (auto it = graph->nodes.begin(); it != graph->nodes.end();)
