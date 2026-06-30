@@ -64,7 +64,6 @@ private:
         std::shared_ptr<mbf_octo_core::GraphData>& graph,
         double planning_height);
 
-
 };
 
 } // namespace astar_planner
