@@ -18,6 +18,7 @@ set(dependencies
   octomap_msgs
   pluginlib
   rclcpp
+  sensor_msgs
   std_srvs
   visualization_msgs
 )

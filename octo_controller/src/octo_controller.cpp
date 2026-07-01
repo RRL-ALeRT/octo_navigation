@@ -96,10 +96,12 @@ uint32_t OctoController::computeVelocityCommands(const geometry_msgs::msg::PoseS
   // std::fmod keeps the dividend's sign so it breaks for negative differences.
   double angle_err = std::remainder(goal_yaw - current_heading, 2.0 * M_PI);
 
-  // Whether the goal pose carries a meaningful orientation (the A* planner emits
-  // identity quaternions, so we only enforce angle alignment when it is non-identity).
-  bool has_goal_orientation = std::abs(gqw - 1.0) > 1e-3 || std::abs(gqx) > 1e-3 ||
-                               std::abs(gqy) > 1e-3    || std::abs(gqz) > 1e-3;
+  // Whether to enforce final heading alignment.  Requires both the parameter to be
+  // enabled AND the goal to carry a non-identity orientation (the A* planner emits
+  // identity quaternions which would otherwise cause a spurious rotation).
+  bool has_goal_orientation = config_.enable_goal_orientation &&
+                               (std::abs(gqw - 1.0) > 1e-3 || std::abs(gqx) > 1e-3 ||
+                                std::abs(gqy) > 1e-3        || std::abs(gqz) > 1e-3);
 
   double linear_vel = 0.0;
   double angular_vel = 0.0;
@@ -127,6 +129,11 @@ uint32_t OctoController::computeVelocityCommands(const geometry_msgs::msg::PoseS
       } else {
         parking_rotation_sign_ = 0.0;  // release lock; P-controller takes over
         angular_vel = config_.ang_vel_factor * angle_err;  // within [-max, max] by construction
+        // Never slow below min_ang_velocity while the error exceeds the goal dead-zone
+        constexpr double kAngDeadzone = 0.06;  // matches isGoalReached angle_tolerance
+        if (std::abs(angle_err) > kAngDeadzone && std::abs(angular_vel) < config_.min_ang_velocity) {
+          angular_vel = std::copysign(config_.min_ang_velocity, angle_err);
+        }
       }
     } else {
       parking_rotation_sign_ = 0.0;
@@ -261,8 +268,9 @@ bool OctoController::isGoalReached(double dist_tolerance, double angle_tolerance
   // The A* planner emits identity quaternions (w=1), so angle check is skipped in that case.
   // Check all four components to match the logic in computeVelocityCommands.
   const auto& gq = goal_pos_.pose.orientation;
-  bool has_goal_orientation = std::abs(gq.w - 1.0) > 1e-3 || std::abs(gq.x) > 1e-3 ||
-                              std::abs(gq.y) > 1e-3        || std::abs(gq.z) > 1e-3;
+  bool has_goal_orientation = config_.enable_goal_orientation &&
+                               (std::abs(gq.w - 1.0) > 1e-3 || std::abs(gq.x) > 1e-3 ||
+                                std::abs(gq.y) > 1e-3        || std::abs(gq.z) > 1e-3);
   bool angle_ok = !has_goal_orientation || std::abs(angle_err) <= angle_tolerance;
 
   return goal_distance <= dist_tolerance && angle_ok;
@@ -293,7 +301,9 @@ rcl_interfaces::msg::SetParametersResult OctoController::reconfigureCallback(std
     if (parameter.get_name() == name_ + ".max_lin_velocity") {
       config_.max_lin_velocity = parameter.as_double();
     } else if (parameter.get_name() == name_ + ".max_ang_velocity") {
-      config_.max_ang_velocity= parameter.as_double();
+      config_.max_ang_velocity = parameter.as_double();
+    } else if (parameter.get_name() == name_ + ".min_ang_velocity") {
+      config_.min_ang_velocity = parameter.as_double();
     } else if (parameter.get_name() == name_ + ".arrival_fading") {
       config_.arrival_fading = parameter.as_double();
     } else if (parameter.get_name() == name_ + ".ang_vel_factor") {
@@ -308,6 +318,8 @@ rcl_interfaces::msg::SetParametersResult OctoController::reconfigureCallback(std
       config_.max_search_distance = parameter.as_double();
     } else if (parameter.get_name() == name_ + ".backward_walking_enable") {
       config_.backward_walking_enable = parameter.as_bool();
+    } else if (parameter.get_name() == name_ + ".enable_goal_orientation") {
+      config_.enable_goal_orientation = parameter.as_bool();
     }
   }
 
@@ -341,6 +353,15 @@ bool OctoController::initialize(const std::string& plugin_name,
     range.to_value = 2.0;
     descriptor.floating_point_range.push_back(range);
     config_.max_ang_velocity = node->declare_parameter(name_ + ".max_ang_velocity", config_.max_ang_velocity);
+  }
+  { // min_ang_velocity
+    rcl_interfaces::msg::ParameterDescriptor descriptor;
+    descriptor.description = "Minimum angular velocity floor in parking P-controller (rad/s)";
+    rcl_interfaces::msg::FloatingPointRange range;
+    range.from_value = 0.0;
+    range.to_value = 2.0;
+    descriptor.floating_point_range.push_back(range);
+    config_.min_ang_velocity = node->declare_parameter(name_ + ".min_ang_velocity", config_.min_ang_velocity);
   }
   { // cost arrival_fading
     rcl_interfaces::msg::ParameterDescriptor descriptor;
@@ -401,6 +422,12 @@ bool OctoController::initialize(const std::string& plugin_name,
     descriptor.description = "If true, the controller may drive in reverse when the lookahead point is behind the robot. "
                              "If false, the robot rotates in place to face the target first, then drives forward.";
     config_.backward_walking_enable = node->declare_parameter(name_ + ".backward_walking_enable", config_.backward_walking_enable, descriptor);
+  }
+  { // enable_goal_orientation
+    rcl_interfaces::msg::ParameterDescriptor descriptor;
+    descriptor.description = "If true, the controller rotates to match the goal orientation in parking mode. "
+                             "If false (default), the robot stops as soon as the position is reached regardless of heading.";
+    config_.enable_goal_orientation = node->declare_parameter(name_ + ".enable_goal_orientation", config_.enable_goal_orientation, descriptor);
   }
 
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(std::bind(

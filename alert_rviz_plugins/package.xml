@@ -17,7 +17,10 @@
   <depend>mbf_msgs</depend>
   <depend>bring_up_alert_nav</depend>
   <depend>std_srvs</depend>
+  <depend>alert_msgs</depend>
   <depend>rviz_common</depend>
+  <depend>rviz_rendering</depend>
+  <depend>rviz_default_plugins</depend>
   <depend>pluginlib</depend>
 
   <test_depend>ament_lint_auto</test_depend>

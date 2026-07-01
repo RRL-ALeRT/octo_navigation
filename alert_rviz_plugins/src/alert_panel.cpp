@@ -49,7 +49,7 @@ AlertPanel::AlertPanel(QWidget* parent)
   v->addWidget(exec_path_btn_);
   connect(exec_path_btn_, &QPushButton::clicked, this, &AlertPanel::onExecPath);
 
-  cancel_path_btn_ = new QPushButton("Cancel Path");
+  cancel_path_btn_ = new QPushButton("Cancel Path/Exp");
   cancel_path_btn_->setStyleSheet("color: white; background-color: #c0392b;");
   v->addWidget(cancel_path_btn_);
   connect(cancel_path_btn_, &QPushButton::clicked, this, &AlertPanel::onCancelPath);
@@ -71,6 +71,8 @@ AlertPanel::AlertPanel(QWidget* parent)
   get_path_client_ = rclcpp_action::create_client<GetPath>(rcl_node_, get_path_action_name_);
   exec_path_client_ = rcl_node_->create_client<StartNav>(exec_path_service_name_);
   cancel_path_client_ = rcl_node_->create_client<std_srvs::srv::Trigger>(cancel_path_service_name_);
+  explore_cancel_client_ = rclcpp_action::create_client<ExploreToGoal>(rcl_node_, explore_action_name_);
+  cmd_vel_pub_ = rcl_node_->create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, rclcpp::QoS(1));
 
   // Log so we can see in the rviz terminal that the panel was constructed
   try {
@@ -132,7 +134,7 @@ void AlertPanel::onFactorChanged(double v)
 {
   if (!param_client_) return;
   std::vector<rclcpp::Parameter> params;
-  params.emplace_back(planner_node_name_ + ".penalty_spread_factor", v);
+  params.emplace_back(mapping_server_node_name_ + ".penalty_spread_factor", v);
   param_client_->set_parameters(params);
 }
 
@@ -140,7 +142,7 @@ void AlertPanel::onRadiusChanged(double v)
 {
   if (!param_client_) return;
   std::vector<rclcpp::Parameter> params;
-  params.emplace_back(planner_node_name_ + ".penalty_spread_radius", v);
+  params.emplace_back(mapping_server_node_name_ + ".penalty_spread_radius", v);
   param_client_->set_parameters(params);
 }
 
@@ -281,6 +283,25 @@ void AlertPanel::onExecPath()
 
 void AlertPanel::onCancelPath()
 {
+  // 1. Publish zero velocity immediately so the robot stops
+  if (cmd_vel_pub_) {
+    cmd_vel_pub_->publish(geometry_msgs::msg::Twist{});
+    RCLCPP_INFO(rcl_node_->get_logger(), "Published zero cmd_vel.");
+  }
+
+  // 2. Cancel all active exploration goals
+  if (explore_cancel_client_) {
+    explore_cancel_client_->async_cancel_all_goals(
+      [this](std::shared_ptr<action_msgs::srv::CancelGoal_Response> response) {
+        RCLCPP_INFO(rcl_node_->get_logger(),
+          "Exploration cancel response: %d goal(s) cancelled.",
+          static_cast<int>(response->goals_canceling.size()));
+      });
+  } else {
+    RCLCPP_WARN(rcl_node_->get_logger(), "Explore action client not initialized.");
+  }
+
+  // 3. Cancel the active nav path (existing service call)
   if (!cancel_path_client_) {
     RCLCPP_ERROR(rcl_node_->get_logger(), "Cancel Path service client not initialized");
     return;

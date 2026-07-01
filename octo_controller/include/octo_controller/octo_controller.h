@@ -157,6 +157,7 @@ private:
   struct {
     double max_lin_velocity = 1.0;
     double max_ang_velocity = 1.0;   // Spot handles 1.0+ rad/s rotation
+    double min_ang_velocity = 0.3;   // floor for P-controller output in parking mode
     double arrival_fading = 0.5;
     double ang_vel_factor = 6.0;     // fine-alignment zone = max_ang / ang_vel_factor ≈ 0.33 rad
     double lin_vel_factor = 1.0;
@@ -164,6 +165,7 @@ private:
     double max_search_radius = 0.4;
     double max_search_distance = 0.4;
     bool backward_walking_enable = false;
+    bool enable_goal_orientation = false;  // when false, skip final heading alignment entirely
   } config_;
 };
 

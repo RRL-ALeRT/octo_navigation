@@ -4,4 +4,10 @@
       Panel to toggle octomap updates and adjust penalty spreading parameters
     </description>
   </class>
+  <class name="alert_nav_plugins/3D ALeRT Exploration" type="alert_nav_plugins::ExplorationArrowTool" base_class_type="rviz_common::Tool">
+    <description>
+      3D interactive arrow tool for setting exploration poses. Click to place, right-click to rotate.
+      Publishes pose to /alert_exploration_pose.
+    </description>
+  </class>
 </library>

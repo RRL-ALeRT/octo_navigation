@@ -47,6 +47,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <octomap/OcTree.h>
 #include <octomap_msgs/msg/octomap.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <std_msgs/msg/color_rgba.hpp>
 
@@ -106,6 +107,8 @@ private:
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
   rclcpp::TimerBase::SharedPtr graph_build_timer_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr graph_marker_pub_;
+  // Walkable nodes + penalty, consumed by graph_exploration
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr graph_cloud_pub_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr reconfigure_handle_;
 
   // ---- Octree --------------------------------------------------------------

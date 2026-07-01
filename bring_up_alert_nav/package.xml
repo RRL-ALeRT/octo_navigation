@@ -23,6 +23,8 @@
   <depend>mbf_octo_core</depend>
   <depend>mbf_msgs</depend>
   <depend>mbf_utility</depend>
+  <depend>rclcpp_action</depend>
+  <depend>alert_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
