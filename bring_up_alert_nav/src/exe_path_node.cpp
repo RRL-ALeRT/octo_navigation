@@ -79,6 +79,15 @@ public:
       std::bind(&ExePath::onCancel, this,
                 std::placeholders::_1, std::placeholders::_2));
 
+    // ⑤ Exploration loop: GetPath(frontier) → ExePath → repeat, until no reachable
+    //    frontier is found max_explore_tries_ times in a row.
+    max_explore_tries_ = this->declare_parameter("max_explore_tries", 6);
+    explore_planner_   = this->declare_parameter("explore_planner", std::string("frontier"));
+    start_explore_srv_ = create_service<std_srvs::srv::Trigger>(
+      "/exe_path/start_exploration",
+      std::bind(&ExePath::onStartExploration, this,
+                std::placeholders::_1, std::placeholders::_2));
+
     RCLCPP_INFO(get_logger(), "ExePath Node ready - waiting for goal_pose.");
   }
 
@@ -218,9 +227,127 @@ private:
     res->message = "ExePath sent";
   }
 
+  // ---------------------------------------------------------------------------
+  // Exploration loop
+  // ---------------------------------------------------------------------------
+  void onStartExploration(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
+                          std::shared_ptr<std_srvs::srv::Trigger::Response> res)
+  {
+    if (exploring_) {
+      res->success = false;
+      res->message = "Already exploring";
+      return;
+    }
+    exploring_ = true;
+    explore_fail_count_ = 0;
+    RCLCPP_INFO(get_logger(), "Exploration started (planner='%s', max_tries=%d)",
+                explore_planner_.c_str(), max_explore_tries_);
+    res->success = true;
+    res->message = "Exploration started";
+    exploreStep();
+  }
+
+  void stopExploration(const std::string& why)
+  {
+    exploring_ = false;
+    if (retry_timer_) retry_timer_->cancel();
+    RCLCPP_INFO(get_logger(), "Exploration stopped: %s", why.c_str());
+  }
+
+  void scheduleExploreStep(std::chrono::milliseconds delay)
+  {
+    if (!exploring_) return;
+    retry_timer_ = create_wall_timer(delay, [this]() {
+      retry_timer_->cancel();
+      exploreStep();
+    });
+  }
+
+  // Ask the frontier planner for a path; on success drive it, else count the miss.
+  void exploreStep()
+  {
+    if (!exploring_) return;
+
+    if (!mbf_getpath_ac_->wait_for_action_server(std::chrono::seconds(2))) {
+      RCLCPP_WARN(get_logger(), "Explore: GetPath server not available; retrying");
+      scheduleExploreStep(std::chrono::seconds(1));
+      return;
+    }
+
+    // The frontier planner ignores the target pose; send a dummy in map frame.
+    auto goal = mbf_msgs::action::GetPath::Goal();
+    goal.use_start_pose = false;
+    goal.target_pose.header.frame_id = "map";
+    goal.target_pose.header.stamp = now();
+    goal.target_pose.pose.orientation.w = 1.0;
+    goal.planner = explore_planner_;
+    goal.tolerance = 0.0;
+
+    auto opts = rclcpp_action::Client<mbf_msgs::action::GetPath>::SendGoalOptions();
+    opts.result_callback =
+      [this](const rclcpp_action::ClientGoalHandle<mbf_msgs::action::GetPath>::WrappedResult & res){
+        if (!exploring_) return;
+        const bool ok = res.code == rclcpp_action::ResultCode::SUCCEEDED
+                        && res.result && !res.result->path.poses.empty();
+        if (ok) {
+          explore_fail_count_ = 0;
+          RCLCPP_INFO(get_logger(), "Explore: frontier path (%zu poses) → execute",
+                      res.result->path.poses.size());
+          execExplorePath(res.result->path);
+        } else {
+          explore_fail_count_++;
+          RCLCPP_WARN(get_logger(), "Explore: no reachable frontier (%d/%d): %s",
+                      explore_fail_count_, max_explore_tries_,
+                      res.result ? res.result->message.c_str() : "no result");
+          if (explore_fail_count_ >= max_explore_tries_)
+            stopExploration("no frontiers after max tries");
+          else
+            scheduleExploreStep(std::chrono::seconds(1));
+        }
+      };
+    mbf_getpath_ac_->async_send_goal(goal, opts);
+  }
+
+  // Drive the frontier path; when the leg finishes (success or not) plan the next.
+  void execExplorePath(const nav_msgs::msg::Path& path)
+  {
+    if (!exploring_) return;
+    if (!exe_path_ac_->wait_for_action_server(std::chrono::seconds(2))) {
+      RCLCPP_WARN(get_logger(), "Explore: ExePath server not available; retrying plan");
+      scheduleExploreStep(std::chrono::seconds(1));
+      return;
+    }
+
+    mbf_msgs::action::ExePath::Goal goal;
+    goal.path = path;
+
+    auto opts = rclcpp_action::Client<mbf_msgs::action::ExePath>::SendGoalOptions();
+    opts.goal_response_callback =
+      [this](auto handle){ exe_path_goal_handle_ = handle; };
+    opts.result_callback =
+      [this](const rclcpp_action::ClientGoalHandle<mbf_msgs::action::ExePath>::WrappedResult & res){
+        exe_path_goal_handle_ = nullptr;
+        if (!exploring_) return;
+        RCLCPP_INFO(get_logger(), "Explore: nav leg finished (code=%d) → plan next",
+                    static_cast<int>(res.code));
+        // Give the octomap a moment to integrate what the robot just saw before we
+        // replan, so the next frontier reflects the freshly-observed space.
+        scheduleExploreStep(std::chrono::seconds(1));
+      };
+    exe_path_ac_->async_send_goal(goal, opts);
+  }
+
   /* ---------- members ---------- */
   nav_msgs::msg::Path latest_path_;
   nav_msgs::msg::Path latest_path__smooth_;
+
+  // Exploration loop state
+  bool exploring_ = false;
+  int  explore_fail_count_ = 0;
+  int  max_explore_tries_ = 6;
+  std::string explore_planner_ = "frontier";
+  rclcpp::TimerBase::SharedPtr retry_timer_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr start_explore_srv_;
 
   // Cancel service
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr cancel_srv_;
@@ -229,6 +356,9 @@ private:
   void onCancel(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
                 std::shared_ptr<std_srvs::srv::Trigger::Response> res)
   {
+    // Also stop the exploration loop so it doesn't immediately re-plan.
+    if (exploring_) stopExploration("cancel requested");
+
     if (!exe_path_goal_handle_) {
       res->success = false;
       res->message = "No active ExePath goal to cancel";

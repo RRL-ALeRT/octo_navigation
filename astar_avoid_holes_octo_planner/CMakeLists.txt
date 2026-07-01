@@ -29,7 +29,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES geometry_msgs
 )
 
-add_Library(avoid_holes_planner_plugin SHARED src/astar_avoid_holes_octo_planner.cpp)
+add_Library(avoid_holes_planner_plugin SHARED
+  src/astar_avoid_holes_octo_planner.cpp
+  src/avoid_holes_exploration_planner.cpp)
 target_include_directories(avoid_holes_planner_plugin PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)

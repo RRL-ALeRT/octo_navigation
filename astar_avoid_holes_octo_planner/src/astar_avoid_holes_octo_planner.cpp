@@ -28,11 +28,7 @@ uint32_t AstarAvoidHolesOctoPlanner::makePlan(
     double & cost,
     std::string & message)
 {
-    auto octree = mapper_->getOctree();
     auto graph = mapper_->getReadyGraph();
-    std::string frame = mapper_->getMapFrame();
-    std::array<double,3> min_b, max_b;
-    mapper_->getBounds(min_b, max_b);
 
     cost = 0.0;
     plan.clear();
@@ -50,23 +46,48 @@ uint32_t AstarAvoidHolesOctoPlanner::makePlan(
     double planning_height = graph->nodes[start_node].center.z();
     graph->nodes[start_node].is_walkable = true;
 
+    // Resolve the goal at its REAL height so a goal on a different level snaps to
+    // that level instead of collapsing onto the start's plane.
     std::string goal_node = findNearestNode(graph,
         octomap::point3d(goal.pose.position.x,
                          goal.pose.position.y,
-                         planning_height));
+                         goal.pose.position.z));
     if (goal_node.empty()) {
         message = "No walkable goal node found";
         return 50;
     }
-    reduceTo2DGraph(graph, planning_height);
+    graph->nodes[goal_node].is_walkable = true;
+
+    // Keep every surface from the LOWER of {start level, goal level} upward, so both
+    // endpoints and everything connecting them survive; prune only what is below.
+    double goal_height = graph->nodes[goal_node].center.z();
+    double reduce_height = std::min(planning_height, goal_height);
+    prepareGraph(graph, reduce_height, planning_height);
+    return runAstar(graph, start_node, goal_node, plan, cost, message);
+}
+
+void AstarAvoidHolesOctoPlanner::prepareGraph(
+    std::shared_ptr<mbf_octo_core::GraphData>& graph,
+    double reduce_height, double planning_height)
+{
+    reduceTo2DGraph(graph, reduce_height);
     for (auto& [id, _] : graph->nodes)
         graph->node_penalty[id] = 0.0;
-    publishGraphAsOctomap(graph,"map");
+    publishGraphAsOctomap(graph, "map");
     publishPenaltyMap(graph, "map", pre_fill_penalty_pub_);
     fillSingleHoles(graph, planning_height);
     inflateLevel(graph);
+}
 
-    std::priority_queue<std::pair<double,std::string>, std::vector<std::pair<double,std::string>>, std::greater<std::pair<double,std::string>>> open_set; 
+uint32_t AstarAvoidHolesOctoPlanner::runAstar(
+    std::shared_ptr<mbf_octo_core::GraphData>& graph,
+    const std::string& start_node, const std::string& goal_node,
+    std::vector<geometry_msgs::msg::PoseStamped>& plan,
+    double& cost, std::string& message)
+{
+    std::string frame = mapper_->getMapFrame();
+
+    std::priority_queue<std::pair<double,std::string>, std::vector<std::pair<double,std::string>>, std::greater<std::pair<double,std::string>>> open_set;
     std::unordered_map<std::string, double> g_score;
     std::unordered_map<std::string, std::string> predecessor;
     std::set<std::string> closed;
@@ -131,13 +152,10 @@ uint32_t AstarAvoidHolesOctoPlanner::makePlan(
         pose.pose.orientation.w = 1.0;
         plan.push_back(pose);
         path.poses.push_back(pose);
-    } 
+    }
     path_pub_->publish(path);
     cost = g_score[goal_node];
-    std::stringstream ss;
-    ss << cost;
-    const char* str = ss.str().c_str();
-    RCLCPP_INFO(node_->get_logger(), str);
+    RCLCPP_INFO(node_->get_logger(), "A* plan cost: %f", cost);
     publishPenaltyMap(graph, "map", penalty_pub_);
     message = "A* plan created successfully";
     return 0;
@@ -214,57 +232,82 @@ void AstarAvoidHolesOctoPlanner::fillSingleHoles(
         }
     }
     for (const auto& p : to_create) {
-    RCLCPP_INFO(node_->get_logger(), "Creating node at: %f %f %f", p.x(), p.y(), p.z());
-    std::string new_id = createNewNode(graph, p.x(), p.y(), p.z());
-    
-    // Sicherstellen dass adj-Eintrag existiert
-    if (graph->adj.find(new_id) == graph->adj.end())
-        graph->adj[new_id] = {};
-    
-    for (const auto& [existing_id, existing_pos] : positions) {
-        double dx = std::abs(p.x() - existing_pos.x());
-        double dy = std::abs(p.y() - existing_pos.y());
-        if (dx <= vs + tol && dy <= vs + tol) {
-            // Sicherstellen dass existing adj-Eintrag existiert
-            if (graph->adj.find(existing_id) == graph->adj.end())
-                graph->adj[existing_id] = {};
-            graph->adj[new_id].push_back(existing_id);
-            graph->adj[existing_id].push_back(new_id);
+        std::string new_id = createNewNode(graph, p.x(), p.y(), p.z());
+        graph->adj[new_id];   // ensure the new node's adjacency entry exists
+
+        // Wire adjacency BOTH ways with every surrounding walkable node in the 8-ring
+        // (within ~1.5 voxels in x and y). `positions` already contains earlier-created
+        // hole nodes, so adjacent fills connect to each other too.
+        for (const auto& [existing_id, existing_pos] : positions) {
+            if (existing_id == new_id) continue;
+            double dx = std::abs(p.x() - existing_pos.x());
+            double dy = std::abs(p.y() - existing_pos.y());
+            if (dx > vs + tol || dy > vs + tol) continue;   // not a neighbour
+
+            auto& new_adj = graph->adj[new_id];
+            auto& ex_adj  = graph->adj[existing_id];        // ensures entry exists
+            if (std::find(new_adj.begin(), new_adj.end(), existing_id) == new_adj.end())
+                new_adj.push_back(existing_id);             // new -> surrounding
+            if (std::find(ex_adj.begin(), ex_adj.end(), new_id) == ex_adj.end())
+                ex_adj.push_back(new_id);                   // surrounding -> new
         }
+        positions[new_id] = p;
     }
-    positions[new_id] = p;
-}
 }
 
 void AstarAvoidHolesOctoPlanner::inflateLevel(
     std::shared_ptr<mbf_octo_core::GraphData>& graph)
 {
     double voxel_size = mapper_->getVoxelSize();
+    // Inflation follows the connected WALKABLE SURFACE, not a single flat plane.
+    // A node's neighbourhood is the immediate 8-ring — horizontal distance within
+    // ~1.5 voxels — allowing up to TWO steps (max_dz) of vertical change. This keeps
+    // floor, ramps and stair treads (and a step up to a level ~2 voxels higher) as one
+    // continuous manifold, so the middle-of-corridor ridge carries smoothly across the
+    // step instead of the step-up nodes looking like borders and inflating (which spikes
+    // the cost and pushes A* off the real path). A drop/rise larger than this is still a
+    // REAL border. We still exclude voxels stacked (near-)directly above/below (small
+    // horizontal offset) so a platform sitting above the floor doesn't merge with it.
+    // NOTE: the graph's own adjacency is far denser than a grid (step edges out to
+    // ~3 cells), so restricting to this immediate ring is essential — otherwise even
+    // edge nodes keep ≥8 neighbours and nothing is ever flagged as a border.
+    const double min_horiz_sq = std::pow(voxel_size * 0.5, 2.0);
+    const double max_horiz_sq = std::pow(voxel_size * 1.5, 2.0);
+    const double max_dz       = voxel_size * 2.5;   // up to ~two levels of vertical change
+
+    auto is_surface_neighbor = [&](const mbf_octo_core::GraphNode& a,
+                                   const mbf_octo_core::GraphNode& b) {
+        if (!b.is_walkable) return false;
+        if (std::abs(b.center.z() - a.center.z()) > max_dz) return false;
+        double dx = b.center.x() - a.center.x();
+        double dy = b.center.y() - a.center.y();
+        double dxy2 = dx * dx + dy * dy;
+        return dxy2 >= min_horiz_sq && dxy2 <= max_horiz_sq;
+    };
+
+    auto walkable_plane_neighbors = [&](const mbf_octo_core::GraphNode& node,
+                                        const std::string& id) {
+        int count = 0;
+        for (const auto& nid : graph->adj[id]) {
+            auto it = graph->nodes.find(nid);
+            if (it == graph->nodes.end()) continue;
+            if (is_surface_neighbor(node, it->second)) ++count;
+        }
+        return count;
+    };
+
     std::set<std::string> frontier;
     std::set<std::string> inflated;
     int step = 1;
 
+    // Border = fewer than border_min_neighbors walkable surface-neighbours in the immediate
+    // ring. Using 7 (not 8) means a node missing a single neighbour (a lone hole beside it)
+    // is NOT treated as a border, so inflation only fires on real edges. Lower to 6 to be
+    // even more tolerant of holes next to the path.
+    const int border_min_neighbors = 7;
     for (const auto& [id, node] : graph->nodes) {
         if (!node.is_walkable) continue;
-
-        bool is_boundary = false;
-
-        // 1) Nachbar existiert nicht im Graph (= Loch oder Kartenrand)
-        if (graph->adj[id].size() < 8) {
-            is_boundary = true;
-        }
-
-        // 2) Nachbar existiert, ist aber nicht walkable
-        if (!is_boundary) {
-            for (const auto& nid : graph->adj[id]) {
-                if (!graph->nodes[nid].is_walkable) {
-                    is_boundary = true;
-                    break;
-                }
-            }
-        }
-
-        if (is_boundary)
+        if (walkable_plane_neighbors(node, id) < border_min_neighbors)
             frontier.insert(id);
     }
 
@@ -274,15 +317,45 @@ void AstarAvoidHolesOctoPlanner::inflateLevel(
         std::set<std::string> next;
         for (const auto& fid : frontier) {
             graph->node_penalty[fid] = 30000.0 / std::pow(2.0, step);
-            for (const auto& nid : graph->adj[fid]) {
-                if (graph->nodes[nid].is_walkable && !inflated.count(nid))
-                    next.insert(nid);
+            auto fit = graph->nodes.find(fid);
+            if (fit != graph->nodes.end()) {
+                for (const auto& nid : graph->adj[fid]) {
+                    auto it = graph->nodes.find(nid);
+                    if (it == graph->nodes.end()) continue;
+                    if (!is_surface_neighbor(fit->second, it->second)) continue;
+                    if (!inflated.count(nid))
+                        next.insert(nid);
+                }
             }
             inflated.insert(fid);
         }
         frontier = next;
         step++;
     }
+
+    // --- Diagnostics: understand the graph's vertical structure & spread -----
+    size_t walkable = 0, penalized = 0;
+    double max_penalty = 0.0;
+    std::map<int, int> z_hist;                 // walkable node count per z-layer (mm)
+    std::map<int, int> neighbor_hist;          // #nodes by same-plane walkable-neighbor count
+    for (const auto& [id, node] : graph->nodes) {
+        if (!node.is_walkable) continue;
+        ++walkable;
+        double p = graph->node_penalty.count(id) ? graph->node_penalty.at(id) : 0.0;
+        if (p > 0.0) { ++penalized; max_penalty = std::max(max_penalty, p); }
+        z_hist[static_cast<int>(std::lround(node.center.z() * 1000.0))]++;
+        int n = walkable_plane_neighbors(node, id);
+        neighbor_hist[std::min(n, 9)]++;       // bucket 9 = "9 or more"
+    }
+    std::stringstream zs;
+    for (const auto& [zmm, c] : z_hist) zs << " z=" << zmm << "mm:" << c;
+    std::stringstream ns;
+    for (const auto& [n, c] : neighbor_hist) ns << " " << n << ":" << c;
+    RCLCPP_INFO(node_->get_logger(),
+        "inflateLevel diag: walkable=%zu penalized(>0)=%zu inflated=%zu max_penalty=%.1f steps=%d",
+        walkable, penalized, inflated.size(), max_penalty, step);
+    RCLCPP_INFO(node_->get_logger(), "inflateLevel diag: z-layers (mm:count):%s", zs.str().c_str());
+    RCLCPP_INFO(node_->get_logger(), "inflateLevel diag: same-plane walkable-neighbor histogram (count:nodes):%s", ns.str().c_str());
 }
 
 bool AstarAvoidHolesOctoPlanner::cancel()
@@ -318,15 +391,12 @@ void AstarAvoidHolesOctoPlanner::publishPenaltyMap(
         auto* n = tree.updateNode(node.center, true);
         
         double penalty = graph->node_penalty.count(id) ? graph->node_penalty.at(id) : 0.0;
-        RCLCPP_INFO(node_->get_logger(), "Node %s penalty: %f", id.c_str(), penalty);
         // Penalty auf Farbe mappen: 0 = grün, hoch = rot
 
         uint8_t r = static_cast<uint8_t>(std::min(255.0, penalty / 5.0));
         uint8_t g = static_cast<uint8_t>(std::max(0.0, 255.0 - penalty / 5.0));
 
-        RCLCPP_INFO(node_->get_logger(), "Node %s red: %d",   id.c_str(), static_cast<int>(r));
-        RCLCPP_INFO(node_->get_logger(), "Node %s green: %d", id.c_str(), static_cast<int>(g));
-        
+
         n->setColor(r, g, 0);
     }
     tree.updateInnerOccupancy();
@@ -396,12 +466,138 @@ void AstarAvoidHolesOctoPlanner::deleteGraphNodeByPose(
     if (!nid.empty()) deleteGraphNodeByID(graph, nid);
 }
 
+void AstarAvoidHolesOctoPlanner::floodFill(std::shared_ptr<mbf_octo_core::GraphData>& graph){
+    if (graph->nodes.empty()) return;
+
+    const double vs = mapper_->getVoxelSize();
+    if (vs <= 0.0) return;
+
+    // Close holes with a per-level morphological CLOSING: grow the floor into empty cells
+    // (dilate) closing_radius times, then shrink it back (erode) the same amount. Dilation
+    // fills corner cells first and then expands inward, so it closes holes of ANY size up to
+    // ~2*closing_radius wide — not just fully-surrounded single cells. Erosion removes the
+    // growth that spilled past the real boundary, so the platform does NOT expand outward.
+    // New cells become cheap (penalty 0) walkable nodes at the surrounding height.
+    //
+    // Everything is PER Z-LEVEL (the cell key carries the z-level): a hole is only closed
+    // from floor on its OWN platform, and the node sits at that platform's height — otherwise
+    // a different-height surface would be counted and a node dropped in mid-air.
+    const int closing_radius = 3;   // fills holes up to ~2*this cells wide (corners included)
+
+    // Cell key packs (ix, iy, level) so lookups are same-level only. level = round(z/voxel).
+    auto cell_key = [](int ix, int iy, int lvl) -> long long {
+        return (static_cast<long long>(ix & 0x1fffff) << 42)
+             ^ (static_cast<long long>(iy & 0x1fffff) << 21)
+             ^  static_cast<long long>(lvl & 0x1fffff);
+    };
+    auto idx = [&](double v){ return static_cast<int>(std::lround(v / vs)); };
+    const int nbr8[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
+
+    struct Cell { int ix, iy, lvl; };
+    std::unordered_set<long long> floor_cells;
+    std::unordered_map<long long, Cell> cell_pos;                        // key -> (ix,iy,lvl)
+    std::unordered_map<long long, double> cell_z;                        // representative z per cell
+    std::unordered_map<long long, std::vector<std::string>> floor_nodes; // original nodes per cell
+    std::unordered_map<long long, std::string> new_node_id;             // node created per filled cell
+    int min_ix = std::numeric_limits<int>::max(), max_ix = std::numeric_limits<int>::lowest();
+    int min_iy = std::numeric_limits<int>::max(), max_iy = std::numeric_limits<int>::lowest();
+    int min_lvl = std::numeric_limits<int>::max(), max_lvl = std::numeric_limits<int>::lowest();
+    for (const auto& [id, node] : graph->nodes) {
+        if (!node.is_walkable) continue;
+        int ix = idx(node.center.x()), iy = idx(node.center.y());
+        int lvl = static_cast<int>(std::lround(node.center.z() / vs));
+        long long k = cell_key(ix, iy, lvl);
+        floor_cells.insert(k);
+        cell_pos[k] = {ix, iy, lvl};
+        floor_nodes[k].push_back(id);
+        min_ix = std::min(min_ix, ix); max_ix = std::max(max_ix, ix);
+        min_iy = std::min(min_iy, iy); max_iy = std::max(max_iy, iy);
+        min_lvl = std::min(min_lvl, lvl); max_lvl = std::max(max_lvl, lvl);
+    }
+    if (floor_cells.empty()) return;
+    for (const auto& [k, ids] : floor_nodes) {
+        double s = 0.0; for (const auto& id : ids) s += graph->nodes[id].center.z();
+        cell_z[k] = s / ids.size();
+    }
+
+    (void)min_ix; (void)max_ix; (void)min_iy; (void)max_iy; (void)min_lvl; (void)max_lvl;
+
+    // work = floor + provisional fill; pos/zmap carry position and height for every cell.
+    std::unordered_set<long long> work = floor_cells;
+    std::unordered_map<long long, Cell> pos = cell_pos;
+    std::unordered_map<long long, double> zmap = cell_z;
+
+    // Dilation: grow into empty same-level neighbours, propagating height outward.
+    for (int r = 0; r < closing_radius; ++r) {
+        std::vector<std::pair<long long, Cell>> add;
+        for (long long k : work) {
+            const Cell& c = pos[k];
+            double z = zmap[k];
+            for (const auto& d : nbr8) {
+                int nx = c.ix + d[0], ny = c.iy + d[1];
+                long long nk = cell_key(nx, ny, c.lvl);
+                if (work.count(nk) || zmap.count(nk)) continue;
+                zmap[nk] = z;
+                add.push_back({nk, {nx, ny, c.lvl}});
+            }
+        }
+        for (auto& [nk, c] : add) { work.insert(nk); pos[nk] = c; }
+    }
+
+    // Erosion: remove grown cells exposed to empty space; never touch original floor.
+    for (int r = 0; r < closing_radius; ++r) {
+        std::vector<long long> rem;
+        for (long long k : work) {
+            if (floor_cells.count(k)) continue;
+            const Cell& c = pos[k];
+            for (const auto& d : nbr8) {
+                long long nk = cell_key(c.ix + d[0], c.iy + d[1], c.lvl);
+                if (!work.count(nk)) { rem.push_back(k); break; }
+            }
+        }
+        for (long long k : rem) work.erase(k);
+    }
+
+    // Whatever survived closing that was not original floor is an interior hole → fill it.
+    size_t total_created = 0;
+    for (long long k : work) {
+        if (floor_cells.count(k)) continue;
+        const Cell& c = pos[k];
+        std::string nid = createNewNode(graph, c.ix * vs, c.iy * vs, zmap[k]);
+        cell_pos[k] = c;
+        new_node_id[k] = nid;
+        graph->adj[nid];
+        ++total_created;
+    }
+
+    // Wire each filled node to same-level 8-ring: original floor nodes and other filled nodes.
+    auto connect = [&](const std::string& a, const std::string& b){
+        auto& av = graph->adj[a];
+        if (std::find(av.begin(), av.end(), b) == av.end()) av.push_back(b);
+    };
+    for (const auto& [k, nid] : new_node_id) {
+        const Cell& c = cell_pos[k];
+        for (const auto& d : nbr8) {
+            long long nk = cell_key(c.ix + d[0], c.iy + d[1], c.lvl);
+            auto fit = floor_nodes.find(nk);
+            if (fit != floor_nodes.end())
+                for (const auto& oid : fit->second) { connect(nid, oid); connect(oid, nid); }
+            auto nnit = new_node_id.find(nk);
+            if (nnit != new_node_id.end() && nnit->second != nid) { connect(nid, nnit->second); connect(nnit->second, nid); }
+        }
+    }
+
+    RCLCPP_INFO(node_->get_logger(),
+        "floodFill: per-level closing(r=%d) filled %zu hole cells",
+        closing_radius, total_created);
+}
+
 void AstarAvoidHolesOctoPlanner::reduceTo2DGraph(
     std::shared_ptr<mbf_octo_core::GraphData>& graph, double z)
 {
     std::unordered_set<std::string> keep;
     for (const auto& [id, node] : graph->nodes)
-        if (std::abs(node.center.z() >= z))
+        if (node.center.z() >= z - 1e-6)   // keep this level and everything above
             keep.insert(id);
 
     for (auto it = graph->nodes.begin(); it != graph->nodes.end();)

@@ -45,6 +45,11 @@ AlertPanel::AlertPanel(QWidget* parent)
   connect(plan_btn_, &QPushButton::clicked, this, &AlertPanel::onPlanToFrame);
   v->addLayout(h3);
 
+  explore_btn_ = new QPushButton("Explore (frontier)");
+  explore_btn_->setStyleSheet("color: white; background-color: #2980b9;");
+  v->addWidget(explore_btn_);
+  connect(explore_btn_, &QPushButton::clicked, this, &AlertPanel::onExplore);
+
   exec_path_btn_ = new QPushButton("Exec Path");
   v->addWidget(exec_path_btn_);
   connect(exec_path_btn_, &QPushButton::clicked, this, &AlertPanel::onExecPath);
@@ -71,6 +76,7 @@ AlertPanel::AlertPanel(QWidget* parent)
   get_path_client_ = rclcpp_action::create_client<GetPath>(rcl_node_, get_path_action_name_);
   exec_path_client_ = rcl_node_->create_client<StartNav>(exec_path_service_name_);
   cancel_path_client_ = rcl_node_->create_client<std_srvs::srv::Trigger>(cancel_path_service_name_);
+  start_explore_client_ = rcl_node_->create_client<std_srvs::srv::Trigger>(start_explore_service_name_);
 
   // Log so we can see in the rviz terminal that the panel was constructed
   try {
@@ -235,6 +241,37 @@ void AlertPanel::onPlanToFrame()
   };
 
   get_path_client_->async_send_goal(goal, options);
+}
+
+void AlertPanel::onExplore()
+{
+  // Kick off the autonomous exploration loop in exe_path_node. It repeatedly asks
+  // the frontier planner for a path and drives it, stopping after N consecutive
+  // "no reachable frontier" results. Use "Cancel Path" to stop early.
+  if (!start_explore_client_) {
+    RCLCPP_ERROR(rcl_node_->get_logger(), "Start-exploration service client not initialized");
+    return;
+  }
+  if (!start_explore_client_->service_is_ready()) {
+    RCLCPP_WARN(rcl_node_->get_logger(), "Service '%s' is not ready",
+                start_explore_service_name_.c_str());
+    return;
+  }
+
+  auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+  start_explore_client_->async_send_request(
+    request,
+    [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+      try {
+        auto response = future.get();
+        if (response->success)
+          RCLCPP_INFO(rcl_node_->get_logger(), "Exploration started: %s", response->message.c_str());
+        else
+          RCLCPP_WARN(rcl_node_->get_logger(), "Exploration not started: %s", response->message.c_str());
+      } catch (const std::exception &e) {
+        RCLCPP_ERROR(rcl_node_->get_logger(), "Start-exploration call failed: %s", e.what());
+      }
+    });
 }
 
 void AlertPanel::updateButtonUI(bool enabled)

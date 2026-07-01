@@ -39,6 +39,7 @@ private Q_SLOTS:
   void onFactorChanged(double v);
   void onRadiusChanged(double v);
   void onPlanToFrame();
+  void onExplore();
   void onExecPath();
   void onCancelPath();
   void updateButtonUI(bool enabled);
@@ -46,6 +47,7 @@ private Q_SLOTS:
 private:
   QPushButton* toggle_btn_ = nullptr;
   QPushButton* plan_btn_ = nullptr;
+  QPushButton* explore_btn_ = nullptr;
   QPushButton* exec_path_btn_ = nullptr;
   QPushButton* cancel_path_btn_ = nullptr;
   QDoubleSpinBox* factor_spin_ = nullptr;
@@ -79,6 +81,10 @@ private:
 
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr cancel_path_client_;
   std::string cancel_path_service_name_ = "/exe_path/cancel_nav";
+
+  // Starts the autonomous frontier-exploration loop in exe_path_node.
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr start_explore_client_;
+  std::string start_explore_service_name_ = "/exe_path/start_exploration";
 };
 
 } // namespace alert_nav_plugins

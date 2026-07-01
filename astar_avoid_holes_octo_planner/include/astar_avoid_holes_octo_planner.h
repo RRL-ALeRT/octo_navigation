@@ -36,7 +36,7 @@ public:
 
     bool cancel() override;
 
-private:
+protected:
     std::string name_;
     rclcpp::Node::SharedPtr node_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
@@ -51,6 +51,7 @@ private:
     void deleteGraphNodeByPose(const std::shared_ptr<mbf_octo_core::GraphData>& graph, const octomap::point3d query);
     void reduceTo2DGraph(std::shared_ptr<mbf_octo_core::GraphData>& graph, double z);
     void inflateLevel(std::shared_ptr<mbf_octo_core::GraphData>& graph);
+    void floodFill(std::shared_ptr<mbf_octo_core::GraphData>& graph);
     void publishGraphAsOctomap(
         const std::shared_ptr<mbf_octo_core::GraphData>& graph,
         const std::string& frame
@@ -63,6 +64,16 @@ private:
     void fillSingleHoles(
         std::shared_ptr<mbf_octo_core::GraphData>& graph,
         double planning_height);
+
+    // Shared graph preparation (prune below reduce_height, zero penalties, fill holes,
+    // inflate) and A* search, so subclasses (e.g. the frontier planner) can reuse the
+    // exact same "reformed" graph and planner without duplicating makePlan.
+    void prepareGraph(std::shared_ptr<mbf_octo_core::GraphData>& graph,
+                      double reduce_height, double planning_height);
+    uint32_t runAstar(std::shared_ptr<mbf_octo_core::GraphData>& graph,
+                      const std::string& start_node, const std::string& goal_node,
+                      std::vector<geometry_msgs::msg::PoseStamped>& plan,
+                      double& cost, std::string& message);
 
 };
 
