@@ -44,6 +44,11 @@ protected:
     mbf_octo_core::OctoMapper::Ptr mapper_;
     std::atomic_bool cancel_planning_{false};
     std::string findNearestNode(const std::shared_ptr<mbf_octo_core::GraphData>& graph, const octomap::point3d& query);
+    // Snap the start to the nearest walkable node inside a forward cone along the robot's
+    // heading (from the start orientation), so navigation begins at a node in front of
+    // Spot even when there is no node directly beneath him. Empty if nothing is ahead.
+    std::string findNodeInFront(const std::shared_ptr<mbf_octo_core::GraphData>& graph,
+                                const geometry_msgs::msg::PoseStamped& start);
     rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr penalty_pub_;
     rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr pre_fill_penalty_pub_;
     std::string createNewNode(const std::shared_ptr<mbf_octo_core::GraphData>& graph, double x, double y, double z);

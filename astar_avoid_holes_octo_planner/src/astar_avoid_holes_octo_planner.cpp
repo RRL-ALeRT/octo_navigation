@@ -34,10 +34,18 @@ uint32_t AstarAvoidHolesOctoPlanner::makePlan(
     plan.clear();
     cancel_planning_ = false;
 
-    std::string start_node = findNearestNode(graph,
-        octomap::point3d(start.pose.position.x,
-                         start.pose.position.y,
-                         start.pose.position.z));
+    // Snap the start to the next walkable node IN FRONT of Spot (along his heading),
+    // not merely the nearest one: the ground directly beneath him may be a hole with no
+    // node at all, so we begin the plan from a node ahead of him.
+    std::string start_node = findNodeInFront(graph, start);
+    if (start_node.empty()) {
+        // Nothing ahead in the forward cone (e.g. facing a wall/edge) — fall back to
+        // the plain nearest walkable node so planning can still proceed.
+        start_node = findNearestNode(graph,
+            octomap::point3d(start.pose.position.x,
+                             start.pose.position.y,
+                             start.pose.position.z));
+    }
     if (start_node.empty()) {
         message = "No walkable start node found";
         return 50;
@@ -442,6 +450,42 @@ std::string AstarAvoidHolesOctoPlanner::findNearestNode(
         double dy = node.center.y() - query.y();
         double dz = node.center.z() - query.z();
         double d = dx*dx + dy*dy + dz*dz;
+        if (d < best_dist) { best_dist = d; best_id = id; }
+    }
+    return best_id;
+}
+
+std::string AstarAvoidHolesOctoPlanner::findNodeInFront(
+    const std::shared_ptr<mbf_octo_core::GraphData>& graph,
+    const geometry_msgs::msg::PoseStamped& start)
+{
+    // Robot forward direction (yaw) extracted from the start orientation quaternion.
+    const auto& q = start.pose.orientation;
+    double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y),
+                            1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    double fx = std::cos(yaw), fy = std::sin(yaw);
+
+    const double sx = start.pose.position.x;
+    const double sy = start.pose.position.y;
+    const double sz = start.pose.position.z;
+
+    // Accept only nodes inside a forward cone (half-angle ~50 deg) so we snap to a node
+    // AHEAD of Spot, never behind or directly beside him.
+    const double min_cos = std::cos(50.0 * M_PI / 180.0);
+    // Ignore nodes essentially under the robot; we want the *next* node forward.
+    const double min_forward = mapper_->getVoxelSize() * 0.5;
+
+    std::string best_id;
+    double best_dist = std::numeric_limits<double>::max();
+    for (const auto& [id, node] : graph->nodes) {
+        if (!node.is_walkable) continue;
+        double dx = node.center.x() - sx;
+        double dy = node.center.y() - sy;
+        double dxy = std::sqrt(dx * dx + dy * dy);
+        if (dxy < min_forward) continue;                 // too close / under Spot
+        if ((dx * fx + dy * fy) / dxy < min_cos) continue;  // outside the forward cone
+        double dz = node.center.z() - sz;
+        double d = dx * dx + dy * dy + dz * dz;
         if (d < best_dist) { best_dist = d; best_id = id; }
     }
     return best_id;
