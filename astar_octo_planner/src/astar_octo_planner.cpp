@@ -115,6 +115,7 @@ bool AstarOctoPlanner::initialize(const std::string& plugin_name,
   enable_radial_clearance_     = node_->declare_parameter(name_ + ".enable_radial_clearance",     enable_radial_clearance_);
   enable_edge_collision_check_ = node_->declare_parameter(name_ + ".enable_edge_collision_check", enable_edge_collision_check_);
   max_z_above_query_           = node_->declare_parameter(name_ + ".max_z_above_query",           max_z_above_query_);
+  retry_lateral_offset_        = node_->declare_parameter(name_ + ".retry_lateral_offset",        retry_lateral_offset_);
 
   RCLCPP_INFO(node_->get_logger(),
     "AstarOctoPlanner: robot_height=%.2f, robot_radius=%.2f, min_vc=%.2f, max_vc=%.2f",
@@ -136,8 +137,23 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
                                      double& cost,
                                      std::string& message)
 {
-  RCLCPP_INFO(node_->get_logger(), "AstarOctoPlanner: makePlan called. start=(%.3f, %.3f, %.3f)",
-              start.pose.position.x, start.pose.position.y, start.pose.position.z);
+  // ---- Retry tracking: detect new goal vs same-goal retry -------------------
+  {
+    auto goals_match = [](const geometry_msgs::msg::PoseStamped& a,
+                          const geometry_msgs::msg::PoseStamped& b) {
+      return std::abs(a.pose.position.x - b.pose.position.x) < 0.02 &&
+             std::abs(a.pose.position.y - b.pose.position.y) < 0.02 &&
+             std::abs(a.pose.position.z - b.pose.position.z) < 0.02;
+    };
+    if (!has_last_goal_ || !goals_match(goal, last_goal_)) {
+      retry_count_   = 0;
+      last_goal_     = goal;
+      has_last_goal_ = true;
+    }
+  }
+  RCLCPP_INFO(node_->get_logger(),
+    "AstarOctoPlanner: makePlan called (retry=%d). start=(%.3f, %.3f, %.3f)",
+    retry_count_, start.pose.position.x, start.pose.position.y, start.pose.position.z);
 
   if (!mapper_) {
     RCLCPP_WARN(node_->get_logger(), "Mapper not set; cannot plan.");
@@ -214,7 +230,11 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   const double goal_dx     = goal_world.x - start_world.x;
   const double goal_dy     = goal_world.y - start_world.y;
   const double forward_dot = goal_dx * cos_yaw + goal_dy * sin_yaw;
-  const double sign        = (forward_dot >= 0.0) ? +1.0 : -1.0;  // +1 front, -1 back
+
+  bool backward_walking_enable = true;
+  node_->get_parameter("octo_controller.backward_walking_enable", backward_walking_enable);
+  // When backward walking is disabled, always offset toward the front of the robot.
+  const double sign = (backward_walking_enable && forward_dot < 0.0) ? -1.0 : +1.0;
 
   // Start search XY offset toward the goal side
   double start_search_x = start_world.x + sign * probe_offset * cos_yaw;
@@ -254,8 +274,28 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   // ---- Snap start and goal to nearest walkable graph nodes ----
   std::string start_id = findClosestGraphNode(
     octomap::point3d(start_search_x, start_search_y, start_search_z), planning_graph);
-  std::string goal_id  = findClosestGraphNode(
-    octomap::point3d(goal_world.x,   goal_world.y,   goal_world.z),  planning_graph);
+
+  // Lateral goal offset: retry 1 → left (+90° from robot yaw),
+  //                      retry 2 → right (-90° from robot yaw),
+  //                      retry 0 (initial) → no offset.
+  double goal_snap_x = goal_world.x;
+  double goal_snap_y = goal_world.y;
+  if (retry_count_ == 1) {
+    goal_snap_x += -std::sin(yaw) * retry_lateral_offset_;
+    goal_snap_y +=  std::cos(yaw) * retry_lateral_offset_;
+    RCLCPP_INFO(node_->get_logger(),
+      "Retry 1: shifting goal snap LEFT by %.2fm → (%.3f, %.3f)",
+      retry_lateral_offset_, goal_snap_x, goal_snap_y);
+  } else if (retry_count_ >= 2) {
+    goal_snap_x +=  std::sin(yaw) * retry_lateral_offset_;
+    goal_snap_y += -std::cos(yaw) * retry_lateral_offset_;
+    RCLCPP_INFO(node_->get_logger(),
+      "Retry %d: shifting goal snap RIGHT by %.2fm → (%.3f, %.3f)",
+      retry_count_, retry_lateral_offset_, goal_snap_x, goal_snap_y);
+  }
+
+  std::string goal_id = findClosestGraphNode(
+    octomap::point3d(goal_snap_x, goal_snap_y, goal_world.z), planning_graph);
 
   // Re-snap start if snapped node has no walkable neighbors
   if (!start_id.empty()) {
@@ -496,6 +536,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
     }
 
     message = "No path found on graph";
+    ++retry_count_;
     return mbf_msgs::action::GetPath::Result::NO_PATH_FOUND;
   }
 
@@ -574,6 +615,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   body_height_path_pub_->publish(lifted);
 
   RCLCPP_INFO(node_->get_logger(), "Path published: %zu waypoints.", plan.size());
+  retry_count_ = 0;
   return mbf_msgs::action::GetPath::Result::SUCCESS;
 }
 
