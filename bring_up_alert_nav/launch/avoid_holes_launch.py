@@ -24,7 +24,7 @@ def generate_launch_description():
     move_base_flex = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
-                [pkg_bring_up, "launch", "mbf_alert_nav_server_launch.py"]
+                [pkg_bring_up, "launch", "mbf_alert_avoid_holes_server_launch.py"]
             )
         ),
     )
