@@ -51,6 +51,7 @@
 #include <vector>
 
 #include <octomap_msgs/conversions.h>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_msgs/msg/color_rgba.hpp>
 #include <geometry_msgs/msg/point.hpp>
 
@@ -155,6 +156,8 @@ void OctoMappingServer::initialize(const std::string & name,
   publish_graph_markers_ = node_->declare_parameter(name_ + ".publish_graph_markers", publish_graph_markers_);
   graph_marker_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
     "~/graph_nodes", rclcpp::QoS(1).transient_local());
+  graph_cloud_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+    "~/graph_cloud", rclcpp::QoS(1).transient_local());
 
   // --- Parameter change callback -------------------------------------------
   reconfigure_handle_ = node_->add_on_set_parameters_callback(
@@ -1583,6 +1586,63 @@ void OctoMappingServer::publishGraphMarkers(
   RCLCPP_DEBUG(node_->get_logger(),
     "Published graph markers: nodes=%zu, penalty_nodes=%zu",
     m.points.size(), pen_m.points.size());
+
+  // Publish walkable nodes + penalty as PointCloud2 for graph_exploration
+  if (graph_cloud_pub_ && graph_cloud_pub_->get_subscription_count() > 0) {
+    // Layout: x(f32) y(f32) z(f32) penalty(f32) — 16 bytes per point
+    std::vector<std::string> walkable_ids;
+    walkable_ids.reserve(graph->nodes.size());
+    for (const auto& kv : graph->nodes)
+      if (kv.second.is_walkable) walkable_ids.push_back(kv.first);
+
+    const uint32_t N = static_cast<uint32_t>(walkable_ids.size());
+    sensor_msgs::msg::PointCloud2 cloud;
+    cloud.header.frame_id = map_frame_.empty() ? "map" : map_frame_;
+    cloud.header.stamp    = node_->now();
+    cloud.height       = 1;
+    cloud.width        = N;
+    cloud.is_bigendian = false;
+    cloud.is_dense     = true;
+
+    auto add_field = [&](const std::string& name, uint32_t offset, uint8_t datatype) {
+      sensor_msgs::msg::PointField f;
+      f.name     = name;
+      f.offset   = offset;
+      f.datatype = datatype;  // FLOAT32 = 7
+      f.count    = 1;
+      cloud.fields.push_back(f);
+    };
+    add_field("x",              0,  sensor_msgs::msg::PointField::FLOAT32);
+    add_field("y",              4,  sensor_msgs::msg::PointField::FLOAT32);
+    add_field("z",              8,  sensor_msgs::msg::PointField::FLOAT32);
+    add_field("penalty",        12, sensor_msgs::msg::PointField::FLOAT32);
+    add_field("neighbor_count", 16, sensor_msgs::msg::PointField::FLOAT32);
+
+    cloud.point_step = 20;
+    cloud.row_step   = 20 * N;
+    cloud.data.resize(20 * N);
+    for (uint32_t i = 0; i < N; ++i) {
+      const auto& node   = graph->nodes.at(walkable_ids[i]);
+      auto it_pen        = graph->node_penalty.find(walkable_ids[i]);
+      const float pen    = (it_pen != graph->node_penalty.end())
+                           ? static_cast<float>(it_pen->second) : 0.0f;
+      float nb_count = 0.0f;
+      auto adj_it = graph->adj.find(walkable_ids[i]);
+      if (adj_it != graph->adj.end()) {
+        for (const auto& nb_id : adj_it->second) {
+          auto nb_it = graph->nodes.find(nb_id);
+          if (nb_it != graph->nodes.end() && nb_it->second.is_walkable) ++nb_count;
+        }
+      }
+      float* pp = reinterpret_cast<float*>(cloud.data.data() + 20 * i);
+      pp[0] = static_cast<float>(node.center.x());
+      pp[1] = static_cast<float>(node.center.y());
+      pp[2] = static_cast<float>(node.center.z());
+      pp[3] = pen;
+      pp[4] = nb_count;
+    }
+    graph_cloud_pub_->publish(cloud);
+  }
 }
 
 // =============================================================================
