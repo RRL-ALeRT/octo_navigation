@@ -22,6 +22,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(octomap_msgs REQUIRED)
 find_package(octomap REQUIRED)
 find_package(rosidl_default_generators REQUIRED) # For StartNav.srv
+find_package(alert_msgs REQUIRED)
 #find_package(webots_spot_msgs REQUIRED) # For posture
 
 # Create Cpp executable
@@ -46,6 +47,13 @@ ament_target_dependencies(offset_tf_pub
   visualization_msgs)
 target_link_libraries(offset_tf_pub octomap)
 
+add_executable(graph_exploration_client src/graph_exploration_client.cpp)
+ament_target_dependencies(graph_exploration_client
+  rclcpp
+  rclcpp_action
+  geometry_msgs
+  alert_msgs)
+
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/StartNav.srv"
 )
@@ -65,6 +73,7 @@ install(
   TARGETS
     exe_path_node
     offset_tf_pub
+    graph_exploration_client
     #posture_manager
   DESTINATION lib/${PROJECT_NAME}
 )
