@@ -80,27 +80,6 @@ protected:
                       std::vector<geometry_msgs::msg::PoseStamped>& plan,
                       double& cost, std::string& message);
 
-    mbf_octo_core::OctoMapper::Ptr mapper_;
-    std::atomic_bool cancel_planning_{false};
-    std::string findNearestNode(const std::shared_ptr<mbf_octo_core::GraphData>& graph, const octomap::point3d& query);
-    rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr penalty_pub_;
-    void createNewNode(const std::shared_ptr<mbf_octo_core::GraphData>& graph, double x, double y, double z);
-    void deleteGraphNodeByID(const std::shared_ptr<mbf_octo_core::GraphData>& graph, std::string id);
-    void deleteGraphNodeByPose(const std::shared_ptr<mbf_octo_core::GraphData>& graph, const octomap::point3d query);
-    void reduceTo2DGraph(std::shared_ptr<mbf_octo_core::GraphData>& graph, double z);
-    void floodFill(std::shared_ptr<mbf_octo_core::GraphData>& graph, std::array<double,3> min_bound, std::array<double,3> max_bound);
-    void flattenPath();
-    void inflateLevel(std::shared_ptr<mbf_octo_core::GraphData>& graph);
-    void publishGraphAsOctomap(
-        const std::shared_ptr<mbf_octo_core::GraphData>& graph,
-        const std::string& frame
-    );
-    void publishPenaltyMap(
-        const std::shared_ptr<mbf_octo_core::GraphData>& graph,
-        const std::string& frame
-    );
-
-
 };
 
 } // namespace astar_planner

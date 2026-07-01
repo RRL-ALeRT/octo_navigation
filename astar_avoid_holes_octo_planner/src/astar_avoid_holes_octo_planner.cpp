@@ -28,7 +28,6 @@ uint32_t AstarAvoidHolesOctoPlanner::makePlan(
     double & cost,
     std::string & message)
 {
-    auto octree = mapper_->getOctree();
     auto graph = mapper_->getReadyGraph();
 
     cost = 0.0;

@@ -104,6 +104,7 @@ AlertPanel::AlertPanel(QWidget* parent)
   cancel_path_client_ = rcl_node_->create_client<std_srvs::srv::Trigger>(cancel_path_service_name_);
   explore_cancel_client_ = rclcpp_action::create_client<ExploreToGoal>(rcl_node_, explore_action_name_);
   cmd_vel_pub_ = rcl_node_->create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, rclcpp::QoS(1));
+  start_explore_client_ = rcl_node_->create_client<std_srvs::srv::Trigger>(start_explore_service_name_);
 
   // Log so we can see in the rviz terminal that the panel was constructed
   try {

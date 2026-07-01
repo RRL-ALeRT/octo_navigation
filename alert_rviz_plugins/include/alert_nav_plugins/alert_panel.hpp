@@ -117,6 +117,9 @@ private:
 
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   std::string cmd_vel_topic_ = "cmd_vel";
+  // Starts the autonomous frontier-exploration loop in exe_path_node.
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr start_explore_client_;
+  std::string start_explore_service_name_ = "/exe_path/start_exploration";
 };
 
 } // namespace alert_nav_plugins
