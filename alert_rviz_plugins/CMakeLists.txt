@@ -25,6 +25,8 @@ endif()
 
 find_package(ament_cmake_ros REQUIRED)
 find_package(rviz_common REQUIRED)
+find_package(rviz_rendering REQUIRED)
+find_package(rviz_default_plugins REQUIRED)
 find_package(Qt5 COMPONENTS Widgets REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
@@ -35,9 +37,11 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(mbf_msgs REQUIRED)
 find_package(bring_up_alert_nav REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(alert_msgs REQUIRED)
 
 qt5_wrap_cpp(MOC_FILES
   include/alert_nav_plugins/alert_panel.hpp
+  include/alert_nav_plugins/exploration_arrow_tool.hpp
 )
 
 set(CMAKE_CXX_STANDARD 17)
@@ -47,6 +51,7 @@ include_directories(include)
 
 add_library(${PROJECT_NAME} SHARED
   src/alert_panel.cpp
+  src/exploration_arrow_tool.cpp
   ${MOC_FILES}
 )
 
@@ -61,6 +66,8 @@ target_link_libraries(${PROJECT_NAME}
 
 ament_target_dependencies(${PROJECT_NAME}
   rviz_common
+  rviz_rendering
+  rviz_default_plugins
   rclcpp
   rclcpp_action
   pluginlib
@@ -70,6 +77,7 @@ ament_target_dependencies(${PROJECT_NAME}
   mbf_msgs
   bring_up_alert_nav
   std_srvs
+  alert_msgs
 )
 
 install(TARGETS ${PROJECT_NAME}
