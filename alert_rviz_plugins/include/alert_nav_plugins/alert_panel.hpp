@@ -43,6 +43,7 @@ private Q_SLOTS:
   void onPlanToFrame();
   void onExecPath();
   void onCancelPath();
+  void onTraceBack();
   void updateButtonUI(bool enabled);
 
 private:
@@ -53,6 +54,7 @@ private:
   QDoubleSpinBox* factor_spin_ = nullptr;
   QDoubleSpinBox* radius_spin_ = nullptr;
   QLineEdit* frame_input_ = nullptr;
+  QPushButton* trace_back_btn_;
 
   // rclcpp node and parameter client
   // rclcpp node and parameter client

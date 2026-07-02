@@ -13,7 +13,7 @@ move_base_flex:
       type: 'astar_octo_planner/AstarOctoPlanner'
       cost_limit: 0.8
       publish_vector_field: true
-      robot_radius: 0.3
+      robot_radius: 0.0
       robot_height: 0.9
     planner_patience: 10.0
     planner_max_retries: 2
