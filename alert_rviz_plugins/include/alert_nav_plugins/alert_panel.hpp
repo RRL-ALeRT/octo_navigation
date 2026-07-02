@@ -47,6 +47,7 @@ private Q_SLOTS:
   void onExplore();
   void onExecPath();
   void onCancelPath();
+  void onTraceBack();
   void updateButtonUI(bool enabled);
   void onPlannerChanged(int index);
   void refreshPlannerList();
@@ -69,6 +70,7 @@ private:
   QString pending_planner_;
   // retries the 'planners' parameter query until move_base_flex is up
   QTimer* planner_poll_timer_ = nullptr;
+  QPushButton* trace_back_btn_;
 
   // rclcpp node and parameter client
   // rclcpp node and parameter client
