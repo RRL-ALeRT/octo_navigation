@@ -3,8 +3,9 @@ move_base_flex:
     global_frame: 'map'
     robot_frame: 'base_link'
     odom_topic: '/odometry'
-    octomap_topic: '/octomap_binary_local'
-
+    octo_mapping_server:
+      octomap_topic: '/octomap_binary_local'
+      initial_octomap_topic: '/octomap_full'
     use_sim_time: false
     force_stop_at_goal: true
     force_stop_on_cancel: true

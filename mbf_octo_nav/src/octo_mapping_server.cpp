@@ -492,39 +492,53 @@ void OctoMappingServer::initialOctomapCallback(
 {
   if (initial_graph_built_) return;
 
-  octomap::OcTree * incoming_tree = convertOctomapMsg(msg);
-  if (!incoming_tree) return;
+  // Keep the subscription alive on failure so a re-published map can retry;
+  // an escaping exception here would take down the whole navigation node.
+  try {
+    octomap::OcTree * incoming_tree = convertOctomapMsg(msg);
+    if (!incoming_tree) return;
 
-  // Full replace: the complete accumulated map becomes the working octree.
-  octree_.reset(incoming_tree);
-  processed_occupied_keys_.clear();
-  nodes_needing_adjacency_update_.clear();
-  updateBoundsFromOctree();
+    // Full replace: the complete accumulated map becomes the working octree.
+    octree_.reset(incoming_tree);
+    processed_occupied_keys_.clear();
+    nodes_needing_adjacency_update_.clear();
+    updateBoundsFromOctree();
 
-  RCLCPP_INFO(node_->get_logger(),
-    "OctoMappingServer: building full graph from '%s' (one-time)...",
-    initial_octomap_topic_.c_str());
+    RCLCPP_INFO(node_->get_logger(),
+      "OctoMappingServer: building full graph from '%s' (one-time)...",
+      initial_octomap_topic_.c_str());
 
-  auto new_graph = std::make_shared<mbf_octo_core::GraphData>();
-  buildConnectivityGraphInto(new_graph);
-  {
-    std::lock_guard<std::mutex> lock(graph_mutex_);
-    active_graph_ = new_graph;
-    processed_occupied_keys_        = new_graph->processed_occupied_keys;
-    nodes_needing_adjacency_update_ = new_graph->nodes_needing_adjacency_update;
-    graph_dirty_ = false;
+    auto new_graph = std::make_shared<mbf_octo_core::GraphData>();
+    buildConnectivityGraphInto(new_graph);
+    {
+      std::lock_guard<std::mutex> lock(graph_mutex_);
+      active_graph_ = new_graph;
+      processed_occupied_keys_        = new_graph->processed_occupied_keys;
+      nodes_needing_adjacency_update_ = new_graph->nodes_needing_adjacency_update;
+      graph_dirty_ = false;
+    }
+
+    if (publish_graph_markers_) {
+      publishGraphMarkers(new_graph);
+    }
+
+    initial_graph_built_ = true;
+    initial_octomap_sub_.reset();  // one-shot: stop listening to the full-map topic
+
+    RCLCPP_INFO(node_->get_logger(),
+      "OctoMappingServer: full graph built (nodes=%zu). Local updates continue on '%s'.",
+      new_graph->size(), octomap_topic_.c_str());
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(node_->get_logger(),
+      "OctoMappingServer: initial graph build from '%s' failed: %s. "
+      "Node keeps running; incremental updates on '%s' remain active.",
+      initial_octomap_topic_.c_str(), e.what(), octomap_topic_.c_str());
+  } catch (...) {
+    RCLCPP_ERROR(node_->get_logger(),
+      "OctoMappingServer: initial graph build from '%s' failed with an unknown error. "
+      "Node keeps running; incremental updates on '%s' remain active.",
+      initial_octomap_topic_.c_str(), octomap_topic_.c_str());
   }
-
-  if (publish_graph_markers_) {
-    publishGraphMarkers(new_graph);
-  }
-
-  initial_graph_built_ = true;
-  initial_octomap_sub_.reset();  // one-shot: stop listening to the full-map topic
-
-  RCLCPP_INFO(node_->get_logger(),
-    "OctoMappingServer: full graph built (nodes=%zu). Local updates continue on '%s'.",
-    new_graph->size(), octomap_topic_.c_str());
 }
 
 // =============================================================================

@@ -153,7 +153,7 @@ private:
   std::string octomap_topic_        = "/octomap_binary_local";
   // One-time full-map build source (the complete accumulated map, not the local
   // rolling window). Consumed once at launch, then unsubscribed.
-  std::string initial_octomap_topic_ = "/octomap_binary";
+  std::string initial_octomap_topic_ = "/octomap_full";
   std::atomic_bool initial_graph_built_{false};
   bool enable_octomap_updates_      = true;
   bool incremental_graph_build_     = true;
