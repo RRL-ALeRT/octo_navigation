@@ -71,6 +71,14 @@ private:
   // retries the 'planners' parameter query until move_base_flex is up
   QTimer* planner_poll_timer_ = nullptr;
   QPushButton* trace_back_btn_;
+  QComboBox* planner_combo_ = nullptr;
+  QPushButton* refresh_planners_btn_ = nullptr;
+  // planner name sent in GetPath goals; empty = MBF default (first loaded)
+  std::string selected_planner_;
+  // planner name restored from the rviz config before the list is available
+  QString pending_planner_;
+  // retries the 'planners' parameter query until move_base_flex is up
+  QTimer* planner_poll_timer_ = nullptr;
 
   // rclcpp node and parameter client
   // rclcpp node and parameter client
@@ -83,6 +91,9 @@ private:
   std::string planner_node_name_ = "octo_planner";
   // mapping server namespace — penalty_spread_factor/radius live here, not in the planner
   std::string mapping_server_node_name_ = "octo_mapping_server";
+  // mapping server plugin namespace inside move_base_flex; owns the octomap
+  // subscription and penalty-spread params (independent of planner names)
+  std::string mapping_server_name_ = "octo_mapping_server";
   // node and parameter key used for toggling octomap updates in the robot stack
   std::string param_node_name_ = "/move_base_flex";
   std::string param_key_ = "octo_mapping_server.enable_octomap_updates";
