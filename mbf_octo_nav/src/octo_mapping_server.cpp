@@ -99,8 +99,10 @@ void OctoMappingServer::initialize(const std::string & name,
   // One-time full-map build source (complete map, not the local rolling window).
   initial_octomap_topic_ = node_->declare_parameter(
     name_ + ".initial_octomap_topic", initial_octomap_topic_);
+  // /octomap_binary is latched (transient_local) — match it so we receive the
+  // already-published full map immediately on subscribe, not just future ones.
   initial_octomap_sub_ = node_->create_subscription<octomap_msgs::msg::Octomap>(
-    initial_octomap_topic_, rclcpp::QoS(1),
+    initial_octomap_topic_, rclcpp::QoS(1).transient_local(),
     std::bind(&OctoMappingServer::initialOctomapCallback, this, std::placeholders::_1));
 
   // --- Sensor model ---------------------------------------------------------
