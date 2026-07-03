@@ -96,6 +96,13 @@ void OctoMappingServer::initialize(const std::string & name,
   incremental_graph_build_ = node_->declare_parameter(
     name_ + ".incremental_graph_build", incremental_graph_build_);
 
+  // One-time full-map build source (complete map, not the local rolling window).
+  initial_octomap_topic_ = node_->declare_parameter(
+    name_ + ".initial_octomap_topic", initial_octomap_topic_);
+  initial_octomap_sub_ = node_->create_subscription<octomap_msgs::msg::Octomap>(
+    initial_octomap_topic_, rclcpp::QoS(1),
+    std::bind(&OctoMappingServer::initialOctomapCallback, this, std::placeholders::_1));
+
   // --- Sensor model ---------------------------------------------------------
   octomap_prob_hit_  = node_->declare_parameter(name_ + ".octomap_prob_hit",  octomap_prob_hit_);
   octomap_prob_miss_ = node_->declare_parameter(name_ + ".octomap_prob_miss", octomap_prob_miss_);
@@ -162,7 +169,8 @@ void OctoMappingServer::initialize(const std::string & name,
   // --- Parameter change callback -------------------------------------------
   reconfigure_handle_ = node_->add_on_set_parameters_callback(
     std::bind(&OctoMappingServer::reconfigureCallback, this, std::placeholders::_1));
-  buildConnectivityGraphInto(active_graph_); 
+  active_graph_ = std::make_shared<mbf_octo_core::GraphData>();
+  buildConnectivityGraphInto(active_graph_);
   // --- Background graph-build timer ----------------------------------------
   graph_build_timer_ = node_->create_wall_timer(
     std::chrono::seconds(1),
@@ -326,37 +334,14 @@ std::shared_ptr<GraphData> OctoMappingServer::getReadyGraph()
 void OctoMappingServer::octomapCallback(
   const octomap_msgs::msg::Octomap::SharedPtr msg)
 {
-  octomap::AbstractOcTree * tree_ptr = nullptr;
-  if (msg->binary) {
-    tree_ptr = octomap_msgs::binaryMsgToMap(*msg);
-  } else {
-    tree_ptr = octomap_msgs::fullMsgToMap(*msg);
-  }
-  if (!tree_ptr) {
-    RCLCPP_ERROR(node_->get_logger(),
-      "Failed to convert Octomap message (binary=%s)", msg->binary ? "true" : "false");
-    return;
-  }
-
   if (!enable_octomap_updates_) {
-    delete tree_ptr;
     return;
   }
 
-  octomap::OcTree * incoming_tree = dynamic_cast<octomap::OcTree *>(tree_ptr);
+  octomap::OcTree * incoming_tree = convertOctomapMsg(msg);
   if (!incoming_tree) {
-    RCLCPP_ERROR(node_->get_logger(), "Octomap message is not an OcTree type");
-    delete tree_ptr;
     return;
   }
-
-  incoming_tree->setProbHit(octomap_prob_hit_);
-  incoming_tree->setProbMiss(octomap_prob_miss_);
-  incoming_tree->setOccupancyThres(octomap_thres_);
-  incoming_tree->setClampingThresMin(octomap_clamp_min_);
-  incoming_tree->setClampingThresMax(octomap_clamp_max_);
-
-  map_frame_ = msg->header.frame_id;
 
   if (incremental_graph_build_ && octree_) {
     size_t merged_count = 0;
@@ -378,6 +363,54 @@ void OctoMappingServer::octomapCallback(
     processed_occupied_keys_.clear();
     nodes_needing_adjacency_update_.clear();
   }
+
+  updateBoundsFromOctree();
+  graph_dirty_ = true;
+}
+
+// =============================================================================
+// convertOctomapMsg — deserialize + apply sensor model; caller owns result
+// =============================================================================
+
+octomap::OcTree * OctoMappingServer::convertOctomapMsg(
+  const octomap_msgs::msg::Octomap::SharedPtr & msg)
+{
+  octomap::AbstractOcTree * tree_ptr = nullptr;
+  if (msg->binary) {
+    tree_ptr = octomap_msgs::binaryMsgToMap(*msg);
+  } else {
+    tree_ptr = octomap_msgs::fullMsgToMap(*msg);
+  }
+  if (!tree_ptr) {
+    RCLCPP_ERROR(node_->get_logger(),
+      "Failed to convert Octomap message (binary=%s)", msg->binary ? "true" : "false");
+    return nullptr;
+  }
+
+  octomap::OcTree * incoming_tree = dynamic_cast<octomap::OcTree *>(tree_ptr);
+  if (!incoming_tree) {
+    RCLCPP_ERROR(node_->get_logger(), "Octomap message is not an OcTree type");
+    delete tree_ptr;
+    return nullptr;
+  }
+
+  incoming_tree->setProbHit(octomap_prob_hit_);
+  incoming_tree->setProbMiss(octomap_prob_miss_);
+  incoming_tree->setOccupancyThres(octomap_thres_);
+  incoming_tree->setClampingThresMin(octomap_clamp_min_);
+  incoming_tree->setClampingThresMax(octomap_clamp_max_);
+
+  map_frame_ = msg->header.frame_id;
+  return incoming_tree;
+}
+
+// =============================================================================
+// updateBoundsFromOctree — recompute spatial bounds / grid / pending keys
+// =============================================================================
+
+void OctoMappingServer::updateBoundsFromOctree()
+{
+  if (!octree_) return;
 
   // Update bounds (never-shrink)
   active_voxel_size_ = octree_->getResolution();
@@ -446,8 +479,50 @@ void OctoMappingServer::octomapCallback(
   RCLCPP_DEBUG(node_->get_logger(),
     "Octomap update: frame=%s res=%.3f occupied=%zu new_voxels=%zu",
     map_frame_.c_str(), active_voxel_size_, occupied, new_voxels);
+}
 
-  graph_dirty_ = true;
+// =============================================================================
+// initialOctomapCallback — one-time full-map graph build, then unsubscribe
+// =============================================================================
+
+void OctoMappingServer::initialOctomapCallback(
+  const octomap_msgs::msg::Octomap::SharedPtr msg)
+{
+  if (initial_graph_built_) return;
+
+  octomap::OcTree * incoming_tree = convertOctomapMsg(msg);
+  if (!incoming_tree) return;
+
+  // Full replace: the complete accumulated map becomes the working octree.
+  octree_.reset(incoming_tree);
+  processed_occupied_keys_.clear();
+  nodes_needing_adjacency_update_.clear();
+  updateBoundsFromOctree();
+
+  RCLCPP_INFO(node_->get_logger(),
+    "OctoMappingServer: building full graph from '%s' (one-time)...",
+    initial_octomap_topic_.c_str());
+
+  auto new_graph = std::make_shared<mbf_octo_core::GraphData>();
+  buildConnectivityGraphInto(new_graph);
+  {
+    std::lock_guard<std::mutex> lock(graph_mutex_);
+    active_graph_ = new_graph;
+    processed_occupied_keys_        = new_graph->processed_occupied_keys;
+    nodes_needing_adjacency_update_ = new_graph->nodes_needing_adjacency_update;
+    graph_dirty_ = false;
+  }
+
+  if (publish_graph_markers_) {
+    publishGraphMarkers(new_graph);
+  }
+
+  initial_graph_built_ = true;
+  initial_octomap_sub_.reset();  // one-shot: stop listening to the full-map topic
+
+  RCLCPP_INFO(node_->get_logger(),
+    "OctoMappingServer: full graph built (nodes=%zu). Local updates continue on '%s'.",
+    new_graph->size(), octomap_topic_.c_str());
 }
 
 // =============================================================================

@@ -105,6 +105,7 @@ private:
   rclcpp::Node::SharedPtr node_;
   std::string name_;
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
+  rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr initial_octomap_sub_;
   rclcpp::TimerBase::SharedPtr graph_build_timer_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr graph_marker_pub_;
   // Walkable nodes + penalty, consumed by graph_exploration
@@ -150,6 +151,10 @@ private:
 
   // ---- Subscription / build control ----------------------------------------
   std::string octomap_topic_        = "/octomap_binary_local";
+  // One-time full-map build source (the complete accumulated map, not the local
+  // rolling window). Consumed once at launch, then unsubscribed.
+  std::string initial_octomap_topic_ = "/octomap_binary";
+  std::atomic_bool initial_graph_built_{false};
   bool enable_octomap_updates_      = true;
   bool incremental_graph_build_     = true;
 
@@ -223,6 +228,13 @@ private:
 
   // ---- Private methods: octomap callback & bounds --------------------------
   void octomapCallback(const octomap_msgs::msg::Octomap::SharedPtr msg);
+  // One-shot handler for the full-map topic: full graph build, then unsubscribe.
+  void initialOctomapCallback(const octomap_msgs::msg::Octomap::SharedPtr msg);
+  // Convert an Octomap message to a configured OcTree (sensor model applied).
+  // Returns nullptr on failure; caller owns the returned pointer.
+  octomap::OcTree * convertOctomapMsg(const octomap_msgs::msg::Octomap::SharedPtr & msg);
+  // Recompute spatial bounds / grid sizes / pending-adjacency keys from octree_.
+  void updateBoundsFromOctree();
 
   // ---- Private methods: graph building -------------------------------------
   void buildConnectivityGraph(double eps = 0.05);
