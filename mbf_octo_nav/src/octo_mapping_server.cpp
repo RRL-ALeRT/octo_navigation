@@ -162,7 +162,7 @@ void OctoMappingServer::initialize(const std::string & name,
   // --- Parameter change callback -------------------------------------------
   reconfigure_handle_ = node_->add_on_set_parameters_callback(
     std::bind(&OctoMappingServer::reconfigureCallback, this, std::placeholders::_1));
-
+  buildConnectivityGraphInto(active_graph_); 
   // --- Background graph-build timer ----------------------------------------
   graph_build_timer_ = node_->create_wall_timer(
     std::chrono::seconds(1),
