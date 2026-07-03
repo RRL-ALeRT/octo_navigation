@@ -8,8 +8,8 @@ move_base_flex:
     force_stop_at_goal: true
     force_stop_on_cancel: true
 
-    planners: ['octo_planner']
-    octo_planner:
+    planners: ['Astar2dPlanner']
+    Astar2dPlanner:
       type: 'astar_2d_planner/Astar2dPlanner'
       cost_limit: 0.95
       publish_vector_field: true

@@ -6,7 +6,9 @@
 #include <QVBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QStringList>
 #include <QTimer>
 #include <memory>
 #include <rclcpp/rclcpp.hpp>
@@ -43,6 +45,9 @@ private Q_SLOTS:
   void onExecPath();
   void onCancelPath();
   void updateButtonUI(bool enabled);
+  void onPlannerChanged(int index);
+  void refreshPlannerList();
+  void updatePlannerList(QStringList names);
 
 private:
   QPushButton* toggle_btn_ = nullptr;
@@ -53,16 +58,25 @@ private:
   QDoubleSpinBox* factor_spin_ = nullptr;
   QDoubleSpinBox* radius_spin_ = nullptr;
   QLineEdit* frame_input_ = nullptr;
+  QComboBox* planner_combo_ = nullptr;
+  QPushButton* refresh_planners_btn_ = nullptr;
+  // planner name sent in GetPath goals; empty = MBF default (first loaded)
+  std::string selected_planner_;
+  // planner name restored from the rviz config before the list is available
+  QString pending_planner_;
+  // retries the 'planners' parameter query until move_base_flex is up
+  QTimer* planner_poll_timer_ = nullptr;
 
   // rclcpp node and parameter client
   // rclcpp node and parameter client
   rclcpp::Node::SharedPtr rcl_node_;
   std::shared_ptr<rclcpp::AsyncParametersClient> param_client_;
-  // planner node (kept for other parameter operations), and remote node to control
-  std::string planner_node_name_ = "octo_planner";
+  // mapping server plugin namespace inside move_base_flex; owns the octomap
+  // subscription and penalty-spread params (independent of planner names)
+  std::string mapping_server_name_ = "octo_mapping_server";
   // node and parameter key used for toggling octomap updates in the robot stack
   std::string param_node_name_ = "/move_base_flex";
-  std::string param_key_ = "octo_planner.enable_octomap_updates";
+  std::string param_key_ = "octo_mapping_server.enable_octomap_updates";
   bool octomap_enabled_ = true;
   QTimer* spin_timer_ = nullptr;
   // true if this panel called rclcpp::init()

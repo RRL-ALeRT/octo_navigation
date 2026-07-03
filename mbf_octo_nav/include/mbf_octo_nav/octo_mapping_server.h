@@ -185,6 +185,12 @@ private:
   // Robot min clearance (used by isStairStep internal check)
   double min_vertical_clearance_      = -0.5;
 
+  // Hole filling (cage raycast over the collapsed 2D column grid)
+  bool   enable_hole_filling_         = true;
+  bool   hole_fill_on_incremental_    = false;  // also fill during incremental updates
+  int    hole_fill_max_area_          = 0;      // max hole size in cells, 0 = unlimited
+  double hole_fill_min_border_ratio_  = 0.5;    // min fraction of walkable border columns
+
   // ---- Penalty / costmap parameters ----------------------------------------
   double wall_penalty_weight_         = 2.0;
   double corner_radius_               = 0.20;
@@ -235,6 +241,16 @@ private:
   bool hasVerticalClearance(const octomap::point3d & center, double node_size,
                              double check_height) const;
   void detectAndAugmentStairs();
+
+  // ---- Private methods: hole filling ----------------------------------------
+  /**
+   * @brief Classify enclosed gaps in the collapsed 2D column grid via a cage of
+   *        border raycasts (splitting along walls on every hit), then fill each
+   *        interior hole with synthetic walkable nodes at the z-level of its
+   *        walkable border columns.
+   * @return Number of synthetic nodes created (also queued for adjacency update).
+   */
+  size_t fillMapHoles();
 
   // ---- Private methods: walkability revalidation ---------------------------
   size_t revalidateWalkability(std::shared_ptr<mbf_octo_core::GraphData> & graph,

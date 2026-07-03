@@ -35,6 +35,22 @@ AlertPanel::AlertPanel(QWidget* parent)
   connect(radius_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &AlertPanel::onRadiusChanged);
   v->addLayout(h2);
 
+  auto hp = new QHBoxLayout();
+  hp->addWidget(new QLabel("Planner"));
+  planner_combo_ = new QComboBox();
+  planner_combo_->addItem("(default)");
+  planner_combo_->setToolTip(
+    "Planner sent with GetPath goals. '(default)' lets move_base_flex use the "
+    "first planner in its 'planners' list.");
+  hp->addWidget(planner_combo_, 1);
+  refresh_planners_btn_ = new QPushButton("⟳");
+  refresh_planners_btn_->setFixedWidth(28);
+  refresh_planners_btn_->setToolTip("Re-query loaded planners from move_base_flex");
+  hp->addWidget(refresh_planners_btn_);
+  connect(planner_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &AlertPanel::onPlannerChanged);
+  connect(refresh_planners_btn_, &QPushButton::clicked, this, &AlertPanel::refreshPlannerList);
+  v->addLayout(hp);
+
   auto h3 = new QHBoxLayout();
   h3->addWidget(new QLabel("Target frame"));
   frame_input_ = new QLineEdit();
@@ -90,6 +106,11 @@ AlertPanel::AlertPanel(QWidget* parent)
   spin_timer_ = new QTimer(this);
   connect(spin_timer_, &QTimer::timeout, [this]() { rclcpp::spin_some(rcl_node_); });
   spin_timer_->start(100);
+
+  // keep asking for the loaded planner list until move_base_flex answers
+  planner_poll_timer_ = new QTimer(this);
+  connect(planner_poll_timer_, &QTimer::timeout, this, &AlertPanel::refreshPlannerList);
+  planner_poll_timer_->start(3000);
   // read current parameter value asynchronously so we don't block the GUI thread
   std::thread([this]() {
     try {
@@ -116,11 +137,23 @@ AlertPanel::~AlertPanel()
 void AlertPanel::load(const rviz_common::Config& config)
 {
   rviz_common::Panel::load(config);
+  QString planner;
+  if (config.mapGetString("planner", &planner) && !planner.isEmpty()) {
+    const int idx = planner_combo_ ? planner_combo_->findText(planner) : -1;
+    if (idx >= 0) {
+      planner_combo_->setCurrentIndex(idx);
+    } else {
+      pending_planner_ = planner;
+    }
+  }
 }
 
 void AlertPanel::save(rviz_common::Config config) const
 {
   rviz_common::Panel::save(config);
+  if (planner_combo_) {
+    config.mapSetValue("planner", planner_combo_->currentText());
+  }
 }
 
 void AlertPanel::onToggleOctomap()
@@ -138,7 +171,7 @@ void AlertPanel::onFactorChanged(double v)
 {
   if (!param_client_) return;
   std::vector<rclcpp::Parameter> params;
-  params.emplace_back(planner_node_name_ + ".penalty_spread_factor", v);
+  params.emplace_back(mapping_server_name_ + ".penalty_spread_factor", v);
   param_client_->set_parameters(params);
 }
 
@@ -146,8 +179,66 @@ void AlertPanel::onRadiusChanged(double v)
 {
   if (!param_client_) return;
   std::vector<rclcpp::Parameter> params;
-  params.emplace_back(planner_node_name_ + ".penalty_spread_radius", v);
+  params.emplace_back(mapping_server_name_ + ".penalty_spread_radius", v);
   param_client_->set_parameters(params);
+}
+
+void AlertPanel::onPlannerChanged(int index)
+{
+  selected_planner_ = (index <= 0 || !planner_combo_)
+    ? std::string()
+    : planner_combo_->itemText(index).toStdString();
+  if (rcl_node_) {
+    RCLCPP_INFO(rcl_node_->get_logger(), "GetPath planner set to '%s'",
+                selected_planner_.empty() ? "(default)" : selected_planner_.c_str());
+  }
+}
+
+void AlertPanel::refreshPlannerList()
+{
+  if (!param_client_ || !param_client_->service_is_ready()) {
+    return;
+  }
+  param_client_->get_parameters(
+    {"planners"},
+    [this](std::shared_future<std::vector<rclcpp::Parameter>> future) {
+      QStringList names;
+      try {
+        auto params = future.get();
+        if (!params.empty() && params[0].get_type() == rclcpp::ParameterType::PARAMETER_STRING_ARRAY) {
+          for (const auto& name : params[0].as_string_array()) {
+            names << QString::fromStdString(name);
+          }
+        }
+      } catch (...) {}
+      // hop to the GUI thread before touching widgets
+      QMetaObject::invokeMethod(this, "updatePlannerList", Qt::QueuedConnection,
+                                Q_ARG(QStringList, names));
+    });
+}
+
+void AlertPanel::updatePlannerList(QStringList names)
+{
+  if (!planner_combo_ || names.isEmpty()) {
+    return;
+  }
+  if (planner_poll_timer_) {
+    planner_poll_timer_->stop();
+  }
+
+  const QString wanted = !pending_planner_.isEmpty() ? pending_planner_ : planner_combo_->currentText();
+  planner_combo_->blockSignals(true);
+  planner_combo_->clear();
+  planner_combo_->addItem("(default)");
+  planner_combo_->addItems(names);
+  const int idx = planner_combo_->findText(wanted);
+  planner_combo_->setCurrentIndex(idx >= 0 ? idx : 0);
+  planner_combo_->blockSignals(false);
+  pending_planner_.clear();
+  onPlannerChanged(planner_combo_->currentIndex());
+
+  RCLCPP_INFO(rcl_node_->get_logger(), "Loaded planners from move_base_flex: %s",
+              names.join(", ").toStdString().c_str());
 }
 
 void AlertPanel::onPlanToFrame()
@@ -212,7 +303,7 @@ void AlertPanel::onPlanToFrame()
   goal.use_start_pose = false;
   goal.target_pose = target_pose;
   goal.tolerance = 0.0;
-  goal.planner = "";
+  goal.planner = selected_planner_;
   goal.concurrency_slot = 0;
 
   auto options = rclcpp_action::Client<GetPath>::SendGoalOptions();
