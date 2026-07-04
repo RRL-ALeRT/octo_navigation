@@ -10,17 +10,9 @@ move_base_flex:
     force_stop_at_goal: true
     force_stop_on_cancel: true
 
-    # Both planners are loaded at startup; GetPath goals pick one by name
-    # (rviz alert panel dropdown). Empty planner name = first in this list.
-    planners: ['AvoidHolesPlanner', 'AstarPlanner']
-    AvoidHolesPlanner:
-      type: 'astar_planner/AstarAvoidHolesOctoPlanner' # Planner for AvoidHoles Arena
-      cost_limit: 0.8
-      publish_vector_field: true
-      robot_radius: 0.0
-      robot_height: 0.7
-    AstarPlanner:
-      type: 'astar_octo_planner/AstarOctoPlanner' # Planner for everything else
+    planners: ['octo_planner']
+    octo_planner:
+      type: 'astar_planner/AstarAvoidHolesOctoPlanner'
       cost_limit: 0.8
       publish_vector_field: true
       robot_radius: 0.1

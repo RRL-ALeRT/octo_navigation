@@ -39,7 +39,6 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
@@ -141,12 +140,6 @@ void OctoMappingServer::initialize(const std::string & name,
   stair_max_xy_dist_          = node_->declare_parameter(name_ + ".stair_max_xy_dist",          stair_max_xy_dist_);
   stair_min_chain_length_     = node_->declare_parameter(name_ + ".stair_min_chain_length",     stair_min_chain_length_);
   stair_max_tread_thickness_  = node_->declare_parameter(name_ + ".stair_max_tread_thickness",  stair_max_tread_thickness_);
-
-  // --- Hole filling -----------------------------------------------------------
-  enable_hole_filling_        = node_->declare_parameter(name_ + ".enable_hole_filling",        enable_hole_filling_);
-  hole_fill_on_incremental_   = node_->declare_parameter(name_ + ".hole_fill_on_incremental",   hole_fill_on_incremental_);
-  hole_fill_max_area_         = node_->declare_parameter(name_ + ".hole_fill_max_area",         hole_fill_max_area_);
-  hole_fill_min_border_ratio_ = node_->declare_parameter(name_ + ".hole_fill_min_border_ratio", hole_fill_min_border_ratio_);
 
   // --- Penalty parameters ---------------------------------------------------
   wall_penalty_weight_    = node_->declare_parameter(name_ + ".wall_penalty_weight",    wall_penalty_weight_);
@@ -684,10 +677,6 @@ void OctoMappingServer::buildConnectivityGraph(double /*eps*/)
   // rebuilding, so those temporary edges are harmless.
   detectAndAugmentStairs();
 
-  // Phase 3.6: cage-raycast hole filling — creates synthetic walkable nodes in
-  // enclosed gap regions BEFORE the adjacency snapshot so they get edges in Phase 4.
-  fillMapHoles();
-
   // Phase 4: adjacency
   // Take the snapshot AFTER Phase 3.5 so is_stair_step flags are visible in the snapshot.
   std::vector<std::pair<std::string, GraphNode>> node_snapshot;
@@ -899,13 +888,6 @@ void OctoMappingServer::updateConnectivityGraphIncremental(double /*eps*/)
   RCLCPP_INFO(node_->get_logger(),
     "Incremental update: added %zu new nodes (total=%zu)",
     new_nodes.size(), graph_nodes_.size());
-
-  // Optional hole filling during incremental updates. Off by default: while the
-  // map is still being explored, frontier gaps look like enclosed holes and
-  // would be filled prematurely (which also starves frontier-based exploration).
-  if (hole_fill_on_incremental_) {
-    fillMapHoles();  // new fill nodes land in nodes_needing_adjacency_update_
-  }
 
   if (new_nodes.empty() && nodes_needing_adjacency_update_.empty()) return;
 
@@ -1157,275 +1139,6 @@ void OctoMappingServer::detectAndAugmentStairs()
       "Stair detection: %zu candidates, %zu regions, %zu tread nodes promoted",
       candidates.size(), stair_regions, total_stair_nodes);
   }
-}
-
-// =============================================================================
-// Hole filling (cage raycast)
-// =============================================================================
-
-size_t OctoMappingServer::fillMapHoles()
-{
-  if (!enable_hole_filling_ || !octree_ || graph_nodes_.empty()) return 0;
-
-  auto t_start = std::chrono::steady_clock::now();
-
-  // --- Phase 1: collapse all z-levels into a 2D column grid -----------------
-  // A column is "occupied" if any graph node exists at that (x, y), regardless
-  // of z — this is the all-z-at-once "cage" view the raycasts operate on.
-  const double vs = std::max(active_voxel_size_, 1e-3);
-  const double ox = min_bound_[0];
-  const double oy = min_bound_[1];
-  const int nx = static_cast<int>(std::ceil((max_bound_[0] - ox) / vs)) + 1;
-  const int ny = static_cast<int>(std::ceil((max_bound_[1] - oy) / vs)) + 1;
-  if (nx <= 2 || ny <= 2) return 0;
-  if (static_cast<long long>(nx) * static_cast<long long>(ny) > 25000000LL) {
-    RCLCPP_WARN(node_->get_logger(),
-      "Hole filling skipped: column grid %dx%d exceeds size limit", nx, ny);
-    return 0;
-  }
-
-  auto cell_idx = [&](int ix, int iy) {
-    return static_cast<size_t>(iy) * static_cast<size_t>(nx) + static_cast<size_t>(ix);
-  };
-
-  std::vector<uint8_t> col_occupied(static_cast<size_t>(nx) * ny, 0);
-  std::vector<uint8_t> outside(static_cast<size_t>(nx) * ny, 0);
-  // Walkable z samples per occupied column — the fill level source for holes.
-  std::unordered_map<size_t, std::vector<float>> col_walkable_z;
-
-  for (const auto & [id, gn] : graph_nodes_) {
-    int ix = static_cast<int>(std::llround((gn.center.x() - ox) / vs));
-    int iy = static_cast<int>(std::llround((gn.center.y() - oy) / vs));
-    if (ix < 0 || ix >= nx || iy < 0 || iy >= ny) continue;
-    size_t idx = cell_idx(ix, iy);
-    col_occupied[idx] = 1;
-    if (gn.is_walkable) {
-      col_walkable_z[idx].push_back(static_cast<float>(gn.center.z()));
-    }
-  }
-
-  // --- Phase 2: cage raycast --------------------------------------------------
-  // Seed a ray from every border cell of the bounding box, pointing inward
-  // (both axis directions → a full cage around the map). Each ray marks the
-  // free cells it crosses as "outside". On hitting an occupied column it splits
-  // into two rays perpendicular to its direction (crawling along the border);
-  // it dies on walls, already-visited cells, and the grid edge. The stack runs
-  // dry when no ray can reach a new cell.
-  struct Ray { int x, y, dx, dy; };
-  std::vector<Ray> ray_stack;
-  ray_stack.reserve(2 * (nx + ny));
-  for (int iy = 0; iy < ny; ++iy) {
-    ray_stack.push_back({0,      iy,  1, 0});
-    ray_stack.push_back({nx - 1, iy, -1, 0});
-  }
-  for (int ix = 0; ix < nx; ++ix) {
-    ray_stack.push_back({ix, 0,      0,  1});
-    ray_stack.push_back({ix, ny - 1, 0, -1});
-  }
-
-  size_t rays_cast = 0;
-  size_t outside_cells = 0;
-  while (!ray_stack.empty()) {
-    Ray r = ray_stack.back();
-    ray_stack.pop_back();
-    ++rays_cast;
-
-    int px = -1, py = -1;  // last free cell this ray marked
-    int cx = r.x, cy = r.y;
-    while (cx >= 0 && cx < nx && cy >= 0 && cy < ny) {
-      size_t idx = cell_idx(cx, cy);
-      if (col_occupied[idx]) {
-        // Hit the map border: split from the last free cell into both
-        // perpendicular directions so the wavefront crawls along the wall.
-        if (px >= 0) {
-          ray_stack.push_back({px - r.dy, py + r.dx, -r.dy,  r.dx});
-          ray_stack.push_back({px + r.dy, py - r.dx,  r.dy, -r.dx});
-        }
-        break;
-      }
-      if (outside[idx]) break;  // already covered by another ray
-      outside[idx] = 1;
-      ++outside_cells;
-      px = cx; py = cy;
-      cx += r.dx; cy += r.dy;
-    }
-  }
-
-  // --- Phase 3: completion sweep ----------------------------------------------
-  // Straight/splitting rays can leave shadowed exterior cells untouched (e.g.
-  // the middle of a wide open area entered through a corridor: rays crawl the
-  // walls but never cross the center). Expand the outside marking through free
-  // cells so no exterior cell is misclassified as an interior hole.
-  static const int DX4[4] = {1, -1, 0, 0};
-  static const int DY4[4] = {0, 0, 1, -1};
-  size_t completion_added = 0;
-  {
-    std::queue<std::pair<int, int>> q;
-    for (int iy = 0; iy < ny; ++iy)
-      for (int ix = 0; ix < nx; ++ix)
-        if (outside[cell_idx(ix, iy)]) q.push({ix, iy});
-    while (!q.empty()) {
-      auto [ux, uy] = q.front(); q.pop();
-      for (int d = 0; d < 4; ++d) {
-        int vx = ux + DX4[d], vy = uy + DY4[d];
-        if (vx < 0 || vx >= nx || vy < 0 || vy >= ny) continue;
-        size_t idx = cell_idx(vx, vy);
-        if (col_occupied[idx] || outside[idx]) continue;
-        outside[idx] = 1;
-        ++completion_added;
-        q.push({vx, vy});
-      }
-    }
-  }
-
-  // --- Phase 4: collect holes and fill them ------------------------------------
-  // Hole = connected component of free columns never reached from outside.
-  // Fill level: walkable z samples of the columns bordering the hole, reduced
-  // to the dominant level (clustered by max_step_height_), then interpolated
-  // per cell by inverse-distance weighting so sloped borders fill as a ramp.
-  static const int DX8[8] = {1, -1, 0, 0, 1, 1, -1, -1};
-  static const int DY8[8] = {0, 0, 1, -1, 1, -1, 1, -1};
-
-  std::vector<uint8_t> hole_seen(static_cast<size_t>(nx) * ny, 0);
-  size_t holes_found = 0, holes_filled = 0, holes_skipped = 0, nodes_created = 0;
-
-  for (int sy = 0; sy < ny; ++sy) {
-    for (int sx = 0; sx < nx; ++sx) {
-      size_t sidx = cell_idx(sx, sy);
-      if (col_occupied[sidx] || outside[sidx] || hole_seen[sidx]) continue;
-
-      // BFS one hole component (4-connected)
-      std::vector<std::pair<int, int>> component;
-      std::queue<std::pair<int, int>> q;
-      q.push({sx, sy});
-      hole_seen[sidx] = 1;
-      while (!q.empty()) {
-        auto [ux, uy] = q.front(); q.pop();
-        component.push_back({ux, uy});
-        for (int d = 0; d < 4; ++d) {
-          int vx = ux + DX4[d], vy = uy + DY4[d];
-          if (vx < 0 || vx >= nx || vy < 0 || vy >= ny) continue;
-          size_t idx = cell_idx(vx, vy);
-          if (col_occupied[idx] || outside[idx] || hole_seen[idx]) continue;
-          hole_seen[idx] = 1;
-          q.push({vx, vy});
-        }
-      }
-      ++holes_found;
-
-      if (hole_fill_max_area_ > 0 &&
-          component.size() > static_cast<size_t>(hole_fill_max_area_)) {
-        ++holes_skipped;
-        continue;
-      }
-
-      // Border columns of this hole (8-connected for denser sampling)
-      std::unordered_set<size_t> border_cols;
-      for (const auto & [ux, uy] : component) {
-        for (int d = 0; d < 8; ++d) {
-          int vx = ux + DX8[d], vy = uy + DY8[d];
-          if (vx < 0 || vx >= nx || vy < 0 || vy >= ny) continue;
-          size_t idx = cell_idx(vx, vy);
-          if (col_occupied[idx]) border_cols.insert(idx);
-        }
-      }
-
-      size_t walkable_border = 0;
-      for (size_t idx : border_cols) {
-        if (col_walkable_z.count(idx)) ++walkable_border;
-      }
-      if (border_cols.empty() ||
-          static_cast<double>(walkable_border) / border_cols.size() <
-            hole_fill_min_border_ratio_) {
-        ++holes_skipped;  // mostly wall-bounded gap — do not invent floor here
-        continue;
-      }
-
-      // Gather (x, y, z) samples from walkable border columns
-      struct Sample { double x, y, z; };
-      std::vector<Sample> samples;
-      for (size_t idx : border_cols) {
-        auto it = col_walkable_z.find(idx);
-        if (it == col_walkable_z.end()) continue;
-        double bx = ox + static_cast<double>(idx % nx) * vs;
-        double by = oy + static_cast<double>(idx / nx) * vs;
-        for (float z : it->second) samples.push_back({bx, by, static_cast<double>(z)});
-      }
-      if (samples.size() < 3) { ++holes_skipped; continue; }
-
-      // Dominant z-level: sort samples, split into clusters at gaps larger
-      // than max_step_height_, keep the cluster with the most samples.
-      std::vector<double> zs;
-      zs.reserve(samples.size());
-      for (const auto & s : samples) zs.push_back(s.z);
-      std::sort(zs.begin(), zs.end());
-      size_t best_start = 0, best_len = 0, cur_start = 0;
-      for (size_t i = 1; i <= zs.size(); ++i) {
-        if (i == zs.size() || zs[i] - zs[i - 1] > max_step_height_) {
-          if (i - cur_start > best_len) { best_len = i - cur_start; best_start = cur_start; }
-          cur_start = i;
-        }
-      }
-      const double z_lo = zs[best_start] - 1e-6;
-      const double z_hi = zs[best_start + best_len - 1] + 1e-6;
-      std::vector<Sample> level_samples;
-      level_samples.reserve(best_len);
-      for (const auto & s : samples) {
-        if (s.z >= z_lo && s.z <= z_hi) level_samples.push_back(s);
-      }
-
-      // Create one synthetic walkable node per hole cell, z from IDW over the
-      // dominant-level border samples.
-      for (const auto & [ux, uy] : component) {
-        double wx = ox + ux * vs;
-        double wy = oy + uy * vs;
-        double num = 0.0, den = 0.0;
-        for (const auto & s : level_samples) {
-          double dx = wx - s.x, dy = wy - s.y;
-          double w = 1.0 / (dx * dx + dy * dy + 1e-6);
-          num += w * s.z;
-          den += w;
-        }
-        double wz = num / den;
-
-        octomap::point3d center(static_cast<float>(wx), static_cast<float>(wy),
-                                static_cast<float>(wz));
-        GraphNode gn;
-        gn.key           = octree_->coordToKey(center);
-        gn.depth         = octree_->getTreeDepth();
-        gn.center        = center;
-        gn.size          = vs;
-        gn.is_walkable   = true;
-        gn.is_stair_step = false;
-        gn.is_hole_fill  = true;
-
-        char idbuf[128];
-        int ix_mm = static_cast<int>(std::round(wx * 1000.0));
-        int iy_mm = static_cast<int>(std::round(wy * 1000.0));
-        int iz_mm = static_cast<int>(std::round(wz * 1000.0));
-        std::snprintf(idbuf, sizeof(idbuf), "c_%d_%d_%d", ix_mm, iy_mm, iz_mm);
-        std::string node_id(idbuf);
-
-        if (graph_nodes_.find(node_id) == graph_nodes_.end()) {
-          graph_nodes_.emplace(node_id, gn);
-          graph_adj_[node_id] = {};
-          nodes_needing_adjacency_update_.insert(node_id);
-          ++nodes_created;
-        }
-      }
-      ++holes_filled;
-    }
-  }
-
-  double dur = std::chrono::duration_cast<std::chrono::duration<double>>(
-    std::chrono::steady_clock::now() - t_start).count();
-  RCLCPP_INFO(node_->get_logger(),
-    "Hole filling: %.3f s, grid=%dx%d, rays=%zu, outside=%zu (+%zu completion), "
-    "holes=%zu (filled=%zu, skipped=%zu), nodes created=%zu",
-    dur, nx, ny, rays_cast, outside_cells, completion_added,
-    holes_found, holes_filled, holes_skipped, nodes_created);
-
-  return nodes_created;
 }
 
 // =============================================================================
@@ -1886,9 +1599,8 @@ void OctoMappingServer::publishGraphMarkers()
     p.z = kv.second.center.z();
     m.points.push_back(p);
     std_msgs::msg::ColorRGBA c;
-    if (kv.second.is_hole_fill)     { c.r = 0.0f; c.g = 0.4f; c.b = 1.0f; c.a = 0.8f; }
-    else if (kv.second.is_walkable) { c.r = 0.0f; c.g = 1.0f; c.b = 0.0f; c.a = 0.8f; }
-    else                            { c.r = 1.0f; c.g = 0.0f; c.b = 0.0f; c.a = 0.8f; }
+    if (kv.second.is_walkable) { c.r = 0.0f; c.g = 1.0f; c.b = 0.0f; c.a = 0.8f; }
+    else                       { c.r = 1.0f; c.g = 0.0f; c.b = 0.0f; c.a = 0.8f; }
     m.colors.push_back(c);
   }
   ma.markers.push_back(m);
@@ -1922,9 +1634,8 @@ void OctoMappingServer::publishGraphMarkers(
     p.z = kv.second.center.z();
     m.points.push_back(p);
     std_msgs::msg::ColorRGBA c;
-    if (kv.second.is_hole_fill)     { c.r = 0.0f; c.g = 0.4f; c.b = 1.0f; c.a = 0.8f; }
-    else if (kv.second.is_walkable) { c.r = 0.0f; c.g = 1.0f; c.b = 0.0f; c.a = 0.8f; }
-    else                            { c.r = 1.0f; c.g = 0.0f; c.b = 0.0f; c.a = 0.8f; }
+    if (kv.second.is_walkable) { c.r = 0.0f; c.g = 1.0f; c.b = 0.0f; c.a = 0.8f; }
+    else                       { c.r = 1.0f; c.g = 0.0f; c.b = 0.0f; c.a = 0.8f; }
     m.colors.push_back(c);
   }
   ma.markers.push_back(m);
@@ -2077,8 +1788,7 @@ void OctoMappingServer::saveMapsOnShutdown()
             << "end_header\n";
         for (const auto & [id, gn] : *nodes_ptr) {
           int r = 255, g = 0, b = 0;
-          if (gn.is_hole_fill)                     { r = 0;   g = 100; b = 255; }
-          else if (gn.is_walkable && gn.is_stair_step) { r = 255; g = 255; b = 0; }
+          if (gn.is_walkable && gn.is_stair_step) { r = 255; g = 255; b = 0; }
           else if (gn.is_walkable)                 { r = 0;   g = 255; b = 0; }
           ply << gn.center.x() << " " << gn.center.y() << " " << gn.center.z()
               << " " << r << " " << g << " " << b << "\n";
@@ -2140,14 +1850,6 @@ OctoMappingServer::reconfigureCallback(std::vector<rclcpp::Parameter> parameters
       stair_min_rise_ = p.as_double(); graph_dirty_ = true; penalties_dirty_ = true;
     } else if (pn == name_ + ".stair_max_rise") {
       stair_max_rise_ = p.as_double(); graph_dirty_ = true; penalties_dirty_ = true;
-    } else if (pn == name_ + ".enable_hole_filling") {
-      enable_hole_filling_ = p.as_bool(); graph_dirty_ = true;
-    } else if (pn == name_ + ".hole_fill_on_incremental") {
-      hole_fill_on_incremental_ = p.as_bool();
-    } else if (pn == name_ + ".hole_fill_max_area") {
-      hole_fill_max_area_ = p.as_int(); graph_dirty_ = true;
-    } else if (pn == name_ + ".hole_fill_min_border_ratio") {
-      hole_fill_min_border_ratio_ = p.as_double(); graph_dirty_ = true;
     } else if (pn == name_ + ".enable_stair_edges") {
       enable_stair_edges_ = p.as_bool();
     } else if (pn == name_ + ".stair_adjacency_multiplier") {

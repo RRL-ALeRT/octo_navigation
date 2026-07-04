@@ -11,6 +11,7 @@
 #include <mbf_msgs/action/get_path.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <algorithm>
+#include <std_msgs/msg/string.hpp>
 
 #define auto_execute_goal_ 0
 
@@ -102,7 +103,7 @@ public:
     // ⑤ Exploration loop: GetPath(frontier) → ExePath → repeat, until no reachable
     //    frontier is found max_explore_tries_ times in a row.
     max_explore_tries_ = this->declare_parameter("max_explore_tries", 6);
-    explore_planner_   = this->declare_parameter("explore_planner", std::string("FrontierPlanner"));
+    explore_planner_   = this->declare_parameter("explore_planner", std::string("frontier"));
     start_explore_srv_ = create_service<std_srvs::srv::Trigger>(
       "/exe_path/start_exploration",
       std::bind(&ExePath::onStartExploration, this,
@@ -424,7 +425,7 @@ private:
   bool exploring_ = false;
   int  explore_fail_count_ = 0;
   int  max_explore_tries_ = 6;
-  std::string explore_planner_ = "FrontierPlanner";
+  std::string explore_planner_ = "frontier";
   rclcpp::TimerBase::SharedPtr retry_timer_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr start_explore_srv_;
 

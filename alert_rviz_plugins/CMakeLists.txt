@@ -53,6 +53,7 @@ add_library(${PROJECT_NAME} SHARED
   src/alert_panel.cpp
   src/movebase_goal_tool.cpp
   src/exploration_arrow_tool.cpp
+  src/movebase_goal_tool.cpp
   ${MOC_FILES}
 )
 

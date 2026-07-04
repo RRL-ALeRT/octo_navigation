@@ -64,8 +64,6 @@ struct GraphNode
   bool is_walkable = true;
   //! true = node was rescued by stair detection (needs wider adjacency)
   bool is_stair_step = false;
-  //! true = synthetic node created by hole filling (no real octree voxel)
-  bool is_hole_fill = false;
 
   std::string id() const
   {
