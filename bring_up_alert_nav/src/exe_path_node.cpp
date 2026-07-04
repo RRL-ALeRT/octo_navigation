@@ -9,6 +9,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <mbf_msgs/action/move_base.hpp>
 #include <mbf_msgs/action/get_path.hpp>
+#include <std_msgs/msg/string.hpp>
 
 #define auto_execute_goal_ 0
 
@@ -36,6 +37,24 @@ public:
         "/initialpose",      // RViz 預設 topic
         10,
         std::bind(&ExePath::goalPoseCallback, this, std::placeholders::_1));
+
+    // "MoveBase Goal" toolbar arrow in rviz (alert_rviz_plugins tool): plan +
+    // drive in one MoveBase action, with the planner from the panel dropdown.
+    movebase_goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+        "/movebase_goal", 10,
+        std::bind(&ExePath::moveBaseGoalCallback, this, std::placeholders::_1));
+
+    // Planner selected in the rviz alert panel dropdown (latched, so a
+    // selection made before this node started is still received). Empty
+    // string = move_base_flex default (first planner in its 'planners' list).
+    planner_sub_ = create_subscription<std_msgs::msg::String>(
+        "/alert_panel/selected_planner",
+        rclcpp::QoS(1).transient_local(),
+        [this](const std_msgs::msg::String::SharedPtr msg) {
+          goal_planner_ = msg->data;
+          RCLCPP_INFO(get_logger(), "Goal planner set to '%s'",
+                      goal_planner_.empty() ? "(default)" : goal_planner_.c_str());
+        });
 
     // ① Get topic of path（astar_2D_planner's publisher）
     std::string path_topic =
@@ -82,7 +101,7 @@ public:
     // ⑤ Exploration loop: GetPath(frontier) → ExePath → repeat, until no reachable
     //    frontier is found max_explore_tries_ times in a row.
     max_explore_tries_ = this->declare_parameter("max_explore_tries", 6);
-    explore_planner_   = this->declare_parameter("explore_planner", std::string("FrontierPlanner"));
+    explore_planner_   = this->declare_parameter("explore_planner", std::string("frontier"));
     start_explore_srv_ = create_service<std_srvs::srv::Trigger>(
       "/exe_path/start_exploration",
       std::bind(&ExePath::onStartExploration, this,
@@ -92,6 +111,47 @@ public:
   }
 
 private:
+  void moveBaseGoalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+  {
+    RCLCPP_INFO(get_logger(), "MoveBase Goal arrow received → send MoveBase (planner='%s')",
+                goal_planner_.empty() ? "(default)" : goal_planner_.c_str());
+
+    if (!mbf_movebase_ac_->wait_for_action_server(std::chrono::seconds(5))) {
+      RCLCPP_ERROR(get_logger(), "MoveBase action server not available!");
+      return;
+    }
+
+    auto goal_msg = mbf_msgs::action::MoveBase::Goal();
+    goal_msg.target_pose = *msg;
+    goal_msg.planner = goal_planner_;
+    auto opts = rclcpp_action::Client<mbf_msgs::action::MoveBase>::SendGoalOptions();
+    opts.goal_response_callback =
+        [this](auto handle){
+          if(!handle)
+            RCLCPP_ERROR(get_logger(), "MoveBase goal rejected");
+          else
+            RCLCPP_INFO (get_logger(), "MoveBase goal accepted");
+        };
+    opts.result_callback =
+        [this](const rclcpp_action::ClientGoalHandle<mbf_msgs::action::MoveBase>::WrappedResult & res){
+          switch(res.code){
+            case rclcpp_action::ResultCode::SUCCEEDED:
+              RCLCPP_INFO (get_logger(), "MoveBase succeeded");
+              break;
+            case rclcpp_action::ResultCode::ABORTED:
+              RCLCPP_WARN (get_logger(), "MoveBase aborted: %s", res.result->message.c_str());
+              break;
+            case rclcpp_action::ResultCode::CANCELED:
+              RCLCPP_INFO (get_logger(), "MoveBase canceled");
+              break;
+            default:
+              RCLCPP_ERROR(get_logger(), "MoveBase finished with unknown code");
+          }
+        };
+
+    mbf_movebase_ac_->async_send_goal(goal_msg, opts);
+  }
+
   void goalPoseCallback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
   {
     if (auto_execute_goal_)
@@ -107,6 +167,7 @@ private:
       auto goal_msg = mbf_msgs::action::MoveBase::Goal();
       goal_msg.target_pose.header = msg->header;
       goal_msg.target_pose.pose = msg->pose.pose;
+      goal_msg.planner = goal_planner_;
       auto opts = rclcpp_action::Client<mbf_msgs::action::MoveBase>::SendGoalOptions();
       opts.goal_response_callback =
           [this](auto handle){
@@ -147,6 +208,7 @@ private:
       auto goal_msg = mbf_msgs::action::GetPath::Goal();
       goal_msg.target_pose.header = msg->header;
       goal_msg.target_pose.pose = msg->pose.pose;
+      goal_msg.planner = goal_planner_;
 
       auto opts = rclcpp_action::Client<mbf_msgs::action::GetPath>::SendGoalOptions();
       opts.goal_response_callback =
@@ -345,7 +407,7 @@ private:
   bool exploring_ = false;
   int  explore_fail_count_ = 0;
   int  max_explore_tries_ = 6;
-  std::string explore_planner_ = "FrontierPlanner";
+  std::string explore_planner_ = "frontier";
   rclcpp::TimerBase::SharedPtr retry_timer_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr start_explore_srv_;
 
@@ -374,6 +436,9 @@ private:
 
   // 2D Goal pose
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr goal_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr movebase_goal_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr planner_sub_;
+  std::string goal_planner_;  // planner for RViz-arrow goals ("" = MBF default)
   rclcpp_action::Client<mbf_msgs::action::MoveBase>::SharedPtr     mbf_movebase_ac_;
   rclcpp_action::Client<mbf_msgs::action::GetPath>::SharedPtr      mbf_getpath_ac_;
   // Exe path

@@ -4,4 +4,10 @@
       Panel to toggle octomap updates and adjust penalty spreading parameters
     </description>
   </class>
+  <class name="alert_nav_plugins/MoveBaseGoalTool" type="alert_nav_plugins::MoveBaseGoalTool" base_class_type="rviz_common::Tool">
+    <description>
+      Toolbar arrow that sends a MoveBase goal (plan + drive) via exe_path_node,
+      using the planner selected in the alert panel dropdown
+    </description>
+  </class>
 </library>

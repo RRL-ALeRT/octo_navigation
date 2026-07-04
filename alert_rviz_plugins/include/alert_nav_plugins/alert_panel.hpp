@@ -21,6 +21,7 @@
 #include <tf2_ros/transform_listener.h>
 #include <bring_up_alert_nav/srv/start_nav.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <std_msgs/msg/string.hpp>
 
 namespace alert_nav_plugins
 {
@@ -84,6 +85,9 @@ private:
 
   using GetPath = mbf_msgs::action::GetPath;
   rclcpp_action::Client<GetPath>::SharedPtr get_path_client_;
+
+  // latched publisher: dropdown selection for exe_path_node's MoveBase goals
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr planner_pub_;
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   std::string map_frame_ = "map";

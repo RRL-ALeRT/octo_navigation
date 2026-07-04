@@ -3,20 +3,23 @@ move_base_flex:
     global_frame: 'map'
     robot_frame: 'base_link'
     odom_topic: '/odometry'
-    octomap_topic: '/octomap_binary'
+    octomap_topic: '/octomap_binary_local'
 
     use_sim_time: false
     force_stop_at_goal: true
     force_stop_on_cancel: true
 
-    octo_mapping_server:
-      min_floor_support_ratio: 0.0
-
-    planners: ['frontier']
-    # Exploration on the avoid-holes graph: ignores the goal, picks a frontier
-    # and plans to it.
-    frontier:
-      type: 'astar_planner/AvoidHolesExplorationPlanner'
+    # Both planners are loaded at startup; GetPath goals pick one by name
+    # (rviz alert panel dropdown). Empty planner name = first in this list.
+    planners: ['AvoidHolesPlanner', 'AstarPlanner']
+    AvoidHolesPlanner:
+      type: 'astar_planner/AstarAvoidHolesOctoPlanner' # Planner for AvoidHoles Arena
+      cost_limit: 0.8
+      publish_vector_field: true
+      robot_radius: 0.0
+      robot_height: 0.7
+    AstarPlanner:
+      type: 'astar_octo_planner/AstarOctoPlanner' # Planner for everything else
       cost_limit: 0.8
       publish_vector_field: true
       robot_radius: 0.0

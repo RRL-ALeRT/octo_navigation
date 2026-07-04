@@ -25,6 +25,7 @@ endif()
 
 find_package(ament_cmake_ros REQUIRED)
 find_package(rviz_common REQUIRED)
+find_package(rviz_default_plugins REQUIRED)
 find_package(Qt5 COMPONENTS Widgets REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
@@ -47,6 +48,7 @@ include_directories(include)
 
 add_library(${PROJECT_NAME} SHARED
   src/alert_panel.cpp
+  src/movebase_goal_tool.cpp
   ${MOC_FILES}
 )
 
@@ -61,6 +63,7 @@ target_link_libraries(${PROJECT_NAME}
 
 ament_target_dependencies(${PROJECT_NAME}
   rviz_common
+  rviz_default_plugins
   rclcpp
   rclcpp_action
   pluginlib

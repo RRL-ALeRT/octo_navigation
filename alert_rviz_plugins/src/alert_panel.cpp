@@ -90,6 +90,10 @@ AlertPanel::AlertPanel(QWidget* parent)
   tf_buffer_ = std::make_unique<tf2_ros::Buffer>(rcl_node_->get_clock());
   tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_, rcl_node_, false);
   get_path_client_ = rclcpp_action::create_client<GetPath>(rcl_node_, get_path_action_name_);
+  // Latched so exe_path_node gets the selection even if it starts later; it
+  // sends the planner with the MoveBase goals triggered by 2D Pose Estimate.
+  planner_pub_ = rcl_node_->create_publisher<std_msgs::msg::String>(
+    "/alert_panel/selected_planner", rclcpp::QoS(1).transient_local());
   exec_path_client_ = rcl_node_->create_client<StartNav>(exec_path_service_name_);
   cancel_path_client_ = rcl_node_->create_client<std_srvs::srv::Trigger>(cancel_path_service_name_);
   start_explore_client_ = rcl_node_->create_client<std_srvs::srv::Trigger>(start_explore_service_name_);
@@ -188,6 +192,11 @@ void AlertPanel::onPlannerChanged(int index)
   selected_planner_ = (index <= 0 || !planner_combo_)
     ? std::string()
     : planner_combo_->itemText(index).toStdString();
+  if (planner_pub_) {
+    std_msgs::msg::String msg;
+    msg.data = selected_planner_;
+    planner_pub_->publish(msg);
+  }
   if (rcl_node_) {
     RCLCPP_INFO(rcl_node_->get_logger(), "GetPath planner set to '%s'",
                 selected_planner_.empty() ? "(default)" : selected_planner_.c_str());
