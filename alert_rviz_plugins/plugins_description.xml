@@ -8,6 +8,10 @@
     <description>
       Toolbar arrow that sends a MoveBase goal (plan + drive) via exe_path_node,
       using the planner selected in the alert panel dropdown
+  <class name="alert_nav_plugins/3D ALeRT Exploration" type="alert_nav_plugins::ExplorationArrowTool" base_class_type="rviz_common::Tool">
+    <description>
+      3D interactive arrow tool for setting exploration poses. Click to place, right-click to rotate.
+      Publishes pose to /alert_exploration_pose.
     </description>
   </class>
 </library>

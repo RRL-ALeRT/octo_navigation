@@ -153,6 +153,15 @@ private:
   // the closest graph node.  Increase for tall stairs / steep ramps.
   double max_z_above_query_ = 0.5;
 
+  // ---- Retry lateral-offset state ------------------------------------------
+  // MBF re-calls makePlan with identical arguments on each retry; we detect
+  // same-goal retries here and shift the goal snap point left/right so A*
+  // tries a different entry node near the goal each time.
+  double retry_lateral_offset_ = 0.5;  // metres left/right of robot heading
+  int    retry_count_     = 0;
+  bool   has_last_goal_   = false;
+  geometry_msgs::msg::PoseStamped last_goal_;
+
   // ---- Utility: hash for tuple<int,int,int> --------------------------------
   struct TupleHash {
     template <typename T1, typename T2, typename T3>

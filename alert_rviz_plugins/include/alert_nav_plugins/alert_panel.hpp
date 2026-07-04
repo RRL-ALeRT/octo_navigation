@@ -15,7 +15,9 @@
 #include <rclcpp_action/rclcpp_action.hpp>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <mbf_msgs/action/get_path.hpp>
+#include <alert_msgs/action/explore_to_goal.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -75,6 +77,10 @@ private:
   // mapping server plugin namespace inside move_base_flex; owns the octomap
   // subscription and penalty-spread params (independent of planner names)
   std::string mapping_server_name_ = "octo_mapping_server";
+  // planner node (kept for other parameter operations), and remote node to control
+  std::string planner_node_name_ = "octo_planner";
+  // mapping server namespace — penalty_spread_factor/radius live here, not in the planner
+  std::string mapping_server_node_name_ = "octo_mapping_server";
   // node and parameter key used for toggling octomap updates in the robot stack
   std::string param_node_name_ = "/move_base_flex";
   std::string param_key_ = "octo_mapping_server.enable_octomap_updates";
@@ -103,6 +109,12 @@ private:
   // Starts the autonomous frontier-exploration loop in exe_path_node.
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr start_explore_client_;
   std::string start_explore_service_name_ = "/exe_path/start_exploration";
+  using ExploreToGoal = alert_msgs::action::ExploreToGoal;
+  rclcpp_action::Client<ExploreToGoal>::SharedPtr explore_cancel_client_;
+  std::string explore_action_name_ = "/graph_explorer/explore_to_goal";
+
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
+  std::string cmd_vel_topic_ = "cmd_vel";
 };
 
 } // namespace alert_nav_plugins
