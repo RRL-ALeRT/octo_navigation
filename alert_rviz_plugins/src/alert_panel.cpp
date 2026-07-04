@@ -184,8 +184,6 @@ void AlertPanel::onFactorChanged(double v)
   if (!param_client_) return;
   std::vector<rclcpp::Parameter> params;
   params.emplace_back(mapping_server_name_ + ".penalty_spread_factor", v);
-  params.emplace_back(mapping_server_node_name_ + ".penalty_spread_factor", v);
-  params.emplace_back(mapping_server_name_ + ".penalty_spread_factor", v);
   param_client_->set_parameters(params);
 }
 
@@ -193,8 +191,6 @@ void AlertPanel::onRadiusChanged(double v)
 {
   if (!param_client_) return;
   std::vector<rclcpp::Parameter> params;
-  params.emplace_back(mapping_server_name_ + ".penalty_spread_radius", v);
-  params.emplace_back(mapping_server_node_name_ + ".penalty_spread_radius", v);
   params.emplace_back(mapping_server_name_ + ".penalty_spread_radius", v);
   param_client_->set_parameters(params);
 }

@@ -40,13 +40,23 @@ uint32_t AvoidHolesExplorationPlanner::makePlan(
     plan.clear();
     cancel_planning_ = false;
 
-    // 1. Snap the robot onto the graph.
-    std::string start_node = findNearestNode(graph,
-        octomap::point3d(start.pose.position.x,
-                         start.pose.position.y,
-                         start.pose.position.z));
+    // 1. Snap the robot onto the graph the same way the path finder does: prefer the
+    //    next walkable node IN FRONT of Spot. A plain 3D-nearest lookup from base_link
+    //    (~0.5 m above the floor) can grab an elevated node beside the robot instead of
+    //    the floor, which drags robot_z — and with it every hole-fill node — too high.
+    std::string start_node = findNodeInFront(graph, start);
     if (start_node.empty()) {
-        message = "No walkable start node found";
+        // Fall back to nearest node WITHIN the feet-height band (see startZBand): never
+        // snap onto a platform Spot is not standing on when his floor is unscanned.
+        const auto [z_min, z_max] = startZBand(start);
+        start_node = findNearestNode(graph,
+            octomap::point3d(start.pose.position.x,
+                             start.pose.position.y,
+                             start.pose.position.z),
+            z_min, z_max);
+    }
+    if (start_node.empty()) {
+        message = "No walkable start node at standing height - floor not scanned yet?";
         return 50;
     }
     graph->nodes[start_node].is_walkable = true;
@@ -78,23 +88,33 @@ uint32_t AvoidHolesExplorationPlanner::makePlan(
         return 50;
     }
 
-    // Rank candidates by a blend of unknown-count and how well the frontier lines up
-    // with Spot's heading, so exploration expands roughly in the direction he is looking
-    // instead of flip-flopping to a big opening behind him. heading_weight_ = 0 -> pure
-    // most-unknown; 1 -> pure "straight ahead".
+    // Rank candidates in three hard tiers, then by score within each tier:
+    //   tier 0: within max_frontier_dist_ AND inside the front cone -> always tried first
+    //   tier 1: within max_frontier_dist_ but off to the side/behind
+    //   tier 2: everything else (far away)
+    // So Spot only plans ahead of himself (or slightly to the side) as long as any such
+    // frontier exists; side/behind and far frontiers are pure fallback so exploration
+    // doesn't dead-end when the space in front is exhausted.
     const double rx = start.pose.position.x;
     const double ry = start.pose.position.y;
     const auto& q  = start.pose.orientation;
     const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y),
                                   1.0 - 2.0 * (q.y * q.y + q.z * q.z));
     const double hx = std::cos(yaw), hy = std::sin(yaw);   // robot heading (unit)
+    const double cone_min_align = std::cos(front_cone_half_deg_ * M_PI / 180.0);
 
     double max_unknown = 1.0;
     for (const auto& [id, u] : last_frontier_candidates_)
         max_unknown = std::max(max_unknown, static_cast<double>(u));
 
-    std::vector<std::pair<double, std::string>> scored;    // (score, id); higher = better
+    // Radius expansion: inside each tier candidates are grouped into distance rings
+    // (frontier_ring_step_ wide). The nearest non-empty ring wins, so the search starts
+    // at the lowest possible radius and opens up ring by ring toward max_frontier_dist_;
+    // score only orders candidates WITHIN one ring.
+    struct Ranked { int tier; int ring; double score; std::string id; };
+    std::vector<Ranked> scored;
     scored.reserve(last_frontier_candidates_.size());
+    int tier0 = 0, tier1 = 0;
     for (const auto& [id, u] : last_frontier_candidates_) {
         auto it = graph->nodes.find(id);
         if (it == graph->nodes.end()) continue;
@@ -105,10 +125,25 @@ uint32_t AvoidHolesExplorationPlanner::makePlan(
         double dir_term  = 0.5 * (alignment + 1.0);                       // [0,1]
         double unk_term  = static_cast<double>(u) / max_unknown;          // [0,1]
         double score = heading_weight_ * dir_term + (1.0 - heading_weight_) * unk_term;
-        scored.push_back({score, id});
+
+        const bool near     = n <= max_frontier_dist_;
+        const bool in_front = alignment >= cone_min_align;
+        const int  tier     = (near && in_front) ? 0 : (near ? 1 : 2);
+        const int  ring     = static_cast<int>(n / frontier_ring_step_);
+        if (tier == 0) ++tier0; else if (tier == 1) ++tier1;
+        scored.push_back({tier, ring, score, id});
     }
     std::sort(scored.begin(), scored.end(),
-              [](const auto& a, const auto& b){ return a.first > b.first; });
+              [](const Ranked& a, const Ranked& b){
+                  if (a.tier != b.tier) return a.tier < b.tier;
+                  if (a.ring != b.ring) return a.ring < b.ring;
+                  return a.score > b.score;
+              });
+
+    RCLCPP_INFO(node_->get_logger(),
+        "Explore ranking: %d front(<=%.1fm, +-%.0fdeg), %d near-side, %zu far/behind",
+        tier0, max_frontier_dist_, front_cone_half_deg_,
+        tier1, scored.size() - tier0 - tier1);
 
     // 4. Walk the candidates. For each, pull the frontier back to a low-penalty node
     //    and test whether A* can actually REACH it from the robot. Take the first that
@@ -119,8 +154,8 @@ uint32_t AvoidHolesExplorationPlanner::makePlan(
     std::string chosen_frontier, chosen_goal;
     int attempts = 0;
 
-    for (const auto& [score, fid] : scored) {
-        (void)score;
+    for (const auto& ranked : scored) {
+        const std::string& fid = ranked.id;
         auto fit = graph->nodes.find(fid);
         if (fit == graph->nodes.end()) continue;
         const octomap::point3d fc = fit->second.center;

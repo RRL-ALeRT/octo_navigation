@@ -81,7 +81,6 @@ private:
   QTimer* planner_poll_timer_ = nullptr;
 
   // rclcpp node and parameter client
-  // rclcpp node and parameter client
   rclcpp::Node::SharedPtr rcl_node_;
   std::shared_ptr<rclcpp::AsyncParametersClient> param_client_;
   // mapping server plugin namespace inside move_base_flex; owns the octomap
@@ -89,8 +88,6 @@ private:
   std::string mapping_server_name_ = "octo_mapping_server";
   // planner node (kept for other parameter operations), and remote node to control
   std::string planner_node_name_ = "octo_planner";
-  // mapping server namespace — penalty_spread_factor/radius live here, not in the planner
-  std::string mapping_server_node_name_ = "octo_mapping_server";
   // mapping server plugin namespace inside move_base_flex; owns the octomap
   // subscription and penalty-spread params (independent of planner names)
   std::string mapping_server_name_ = "octo_mapping_server";

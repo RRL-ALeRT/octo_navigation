@@ -102,7 +102,7 @@ public:
 
     // ⑤ Exploration loop: GetPath(frontier) → ExePath → repeat, until no reachable
     //    frontier is found max_explore_tries_ times in a row.
-    max_explore_tries_ = this->declare_parameter("max_explore_tries", 6);
+    max_explore_tries_ = this->declare_parameter("max_explore_tries", 10);
     explore_planner_   = this->declare_parameter("explore_planner", std::string("frontier"));
     start_explore_srv_ = create_service<std_srvs::srv::Trigger>(
       "/exe_path/start_exploration",

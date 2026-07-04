@@ -44,11 +44,21 @@ protected:
     mbf_octo_core::OctoMapper::Ptr mapper_;
     std::atomic_bool cancel_planning_{false};
     std::string findNearestNode(const std::shared_ptr<mbf_octo_core::GraphData>& graph, const octomap::point3d& query);
+    // Same, but only accepts nodes with min_z <= node.z <= max_z. Used for START snapping
+    // so the robot can never snap onto a surface (e.g. a platform) it is not standing on.
+    std::string findNearestNode(const std::shared_ptr<mbf_octo_core::GraphData>& graph,
+                                const octomap::point3d& query,
+                                double min_z, double max_z);
     // Snap the start to the nearest walkable node inside a forward cone along the robot's
     // heading (from the start orientation), so navigation begins at a node in front of
     // Spot even when there is no node directly beneath him. Empty if nothing is ahead.
+    // Only accepts nodes whose z is plausible for the surface Spot is STANDING on
+    // (feet height = start.z - stand_height_, +max_step_height / -1.0 m band).
     std::string findNodeInFront(const std::shared_ptr<mbf_octo_core::GraphData>& graph,
                                 const geometry_msgs::msg::PoseStamped& start);
+    // Feet-height band for start snapping, derived from the robot's REAL height (TF),
+    // independent of what is scanned. first = min_z, second = max_z.
+    std::pair<double,double> startZBand(const geometry_msgs::msg::PoseStamped& start) const;
     rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr penalty_pub_;
     rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr pre_fill_penalty_pub_;
     std::string createNewNode(const std::shared_ptr<mbf_octo_core::GraphData>& graph, double x, double y, double z);
@@ -80,6 +90,10 @@ protected:
                       std::vector<geometry_msgs::msg::PoseStamped>& plan,
                       double& cost, std::string& message);
 
+    // Vertical distance from base_link down to Spot's feet (standing height). Used with
+    // the start pose's TF z to compute the true floor height even when the floor is not
+    // scanned yet. ROS parameter "<name>.stand_height".
+    double stand_height_ = 0.5;
 };
 
 } // namespace astar_planner

@@ -392,13 +392,16 @@ void GraphExplorer::explore(const std::shared_ptr<ExploreHandle>& handle)
     empty_cycles = 0;
 
     // 6. Select best candidate
-    const auto best = selectBest(candidates, rx, ry, gx, gy);
+    const auto best = selectBest(candidates, rx, ry, robot_yaw, gx, gy);
     RCLCPP_INFO(get_logger(),
       "Best waypoint: (%.2f,%.2f,%.2f) clearance=%.2fm node_pen=%.2f neighbors=%.0f",
       best.x, best.y, best.z, best.clearance, best.penalty, best.neighbor_count);
 
-    // 7. Navigate to waypoint
-    const auto target  = makePoseToward(best.x, best.y, best.z, gx, gy);
+    // 7. Navigate to waypoint. Orient along the direction of travel so the
+    // robot arrives facing onward — the next cycle's front cone then continues
+    // the same path instead of forcing a turn-around.
+    const auto target  = makePoseToward(best.x, best.y, best.z,
+                                        2.f * best.x - rx, 2.f * best.y - ry);
     const bool reached = sendMoveBaseGoal(target);
     {
       std::lock_guard<std::mutex> lock(visited_mutex_);
@@ -771,6 +774,13 @@ std::vector<GraphExplorer::Candidate> GraphExplorer::findCandidates(
 // =============================================================================
 // Candidate scoring
 //
+// Candidates are grouped into expanding heading cones around the robot's
+// current yaw (±30° → ±60° → ±90° → ±135° → 180°).  The narrowest non-empty
+// cone wins outright: a frontier in front of the robot always beats one
+// behind it, so the robot keeps following its own path forward and only
+// turns around when nothing ahead is left to explore.
+//
+// Within the winning cone:
 // Primary: clearance (minimum directional ray distance) — open space wins.
 // Secondary: alignment toward goal (weak directional bias allows backtracking).
 // Tertiary: distance toward outer search radius, low wall penalty.
@@ -778,7 +788,7 @@ std::vector<GraphExplorer::Candidate> GraphExplorer::findCandidates(
 
 GraphExplorer::Candidate GraphExplorer::selectBest(
     const std::vector<Candidate>& candidates,
-    float robot_x, float robot_y,
+    float robot_x, float robot_y, float robot_yaw,
     float goal_x,  float goal_y)
 {
   float gdx   = goal_x - robot_x;
@@ -812,8 +822,10 @@ GraphExplorer::Candidate GraphExplorer::selectBest(
   if (max_clearance < 1e-4f) max_clearance = kRayMaxDist;
   if (max_pen       < 1e-6f) max_pen       = 1.0f;
 
-  float            best_score = -std::numeric_limits<float>::infinity();
-  const Candidate* best       = nullptr;
+  // Hard filters + per-candidate score and heading deviation from robot yaw
+  struct Scored { const Candidate* c; float heading_dev; float score; };
+  std::vector<Scored> valid;
+  valid.reserve(candidates.size());
 
   for (const auto& c : candidates) {
     const float fdx   = c.x - robot_x;
@@ -850,7 +862,34 @@ GraphExplorer::Candidate GraphExplorer::selectBest(
                       + 0.15f * dist_bonus
                       - static_cast<float>(penalty_weight_) * norm_pen;
 
-    if (score > best_score) { best_score = score; best = &c; }
+    const float heading_dev = std::abs(static_cast<float>(
+      std::remainder(std::atan2(fdy, fdx) - robot_yaw, 2.0 * M_PI)));
+
+    valid.push_back({&c, heading_dev, score});
+  }
+
+  // Expanding heading cones: the narrowest cone containing any valid candidate
+  // wins, so frontiers in front of the robot always beat ones behind it.
+  static constexpr float kConeHalfAngles[] = {
+    static_cast<float>(M_PI / 6.0),        //  ±30°
+    static_cast<float>(M_PI / 3.0),        //  ±60°
+    static_cast<float>(M_PI / 2.0),        //  ±90°
+    static_cast<float>(3.0 * M_PI / 4.0),  // ±135°
+    static_cast<float>(M_PI),              //  180° (full circle)
+  };
+
+  const Scored* best = nullptr;
+  for (float cone : kConeHalfAngles) {
+    for (const auto& s : valid) {
+      if (s.heading_dev > cone) continue;
+      if (!best || s.score > best->score) best = &s;
+    }
+    if (best) {
+      RCLCPP_INFO(get_logger(),
+        "Selected frontier within ±%.0f° front cone (heading_dev=%.0f°, %zu valid candidates).",
+        cone * 180.0 / M_PI, best->heading_dev * 180.0 / M_PI, valid.size());
+      break;
+    }
   }
 
   if (!best) {
@@ -860,7 +899,7 @@ GraphExplorer::Candidate GraphExplorer::selectBest(
     visited_waypoints_.clear();
     return candidates.front();
   }
-  return *best;
+  return *best->c;
 }
 
 // =============================================================================

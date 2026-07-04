@@ -12,6 +12,8 @@
     <description>
       3D interactive arrow tool for setting exploration poses. Click to place, right-click to rotate.
       Publishes pose to /alert_exploration_pose.
+    </description>
+  </class>
   <class name="alert_nav_plugins/MoveBaseGoalTool" type="alert_nav_plugins::MoveBaseGoalTool" base_class_type="rviz_common::Tool">
     <description>
       Toolbar arrow that sends a MoveBase goal (plan + drive) via exe_path_node,

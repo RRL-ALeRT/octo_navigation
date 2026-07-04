@@ -73,6 +73,13 @@ private:
                                             // ~step 6 off the edge. Lower = pull back further.
     double heading_weight_        = 0.6;    // 0..1 blend: 0 = pure most-unknown, 1 = pure
                                             // "expand where Spot is looking" (forward bias)
+    double max_frontier_dist_     = 3.0;    // m; frontiers beyond this are last-resort only
+    double front_cone_half_deg_   = 60.0;   // deg; half-angle of the "ahead or slightly to
+                                            // the side" cone. Near+in-cone frontiers are
+                                            // ALWAYS preferred over side/behind/far ones.
+    double frontier_ring_step_    = 0.5;    // m; radius-expansion ring width. The nearest
+                                            // non-empty ring wins, expanding outward up to
+                                            // max_frontier_dist_.
     int    max_frontier_attempts_ = 30;     // max distinct frontiers to A*-test per plan
     double frontier_cluster_dist_ = 0.5;    // m; frontiers closer than this are one region
     double min_travel_dist_       = 0.6;    // m; skip a frontier whose goal is nearer than

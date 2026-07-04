@@ -158,7 +158,7 @@ private:
 
   Candidate selectBest(
     const std::vector<Candidate>& candidates,
-    float robot_x, float robot_y,
+    float robot_x, float robot_y, float robot_yaw,
     float goal_x,  float goal_y);
 
   // --- Navigation -------------------------------------------------------------

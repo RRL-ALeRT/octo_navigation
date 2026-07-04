@@ -3,13 +3,13 @@ move_base_flex:
     global_frame: 'map'
     robot_frame: 'base_link'
     odom_topic: '/odometry'
-    octomap_topic: '/octomap_binary'
 
     use_sim_time: false
     force_stop_at_goal: true
     force_stop_on_cancel: true
 
     octo_mapping_server:
+      octomap_topic: '/octomap_binary'
       min_floor_support_ratio: 0.0
 
     planners: ['frontier']

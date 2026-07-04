@@ -39,15 +39,20 @@ uint32_t AstarAvoidHolesOctoPlanner::makePlan(
     // node at all, so we begin the plan from a node ahead of him.
     std::string start_node = findNodeInFront(graph, start);
     if (start_node.empty()) {
-        // Nothing ahead in the forward cone (e.g. facing a wall/edge) — fall back to
-        // the plain nearest walkable node so planning can still proceed.
+        // Nothing ahead in the forward cone (e.g. facing a wall/edge) — fall back to the
+        // nearest walkable node WITHIN the feet-height band, so we still never snap onto
+        // a surface Spot is not standing on.
+        const auto [z_min, z_max] = startZBand(start);
         start_node = findNearestNode(graph,
             octomap::point3d(start.pose.position.x,
                              start.pose.position.y,
-                             start.pose.position.z));
+                             start.pose.position.z),
+            z_min, z_max);
     }
     if (start_node.empty()) {
-        message = "No walkable start node found";
+        // No node at a plausible standing height: the floor beneath Spot is probably not
+        // scanned yet. Fail (caller retries) instead of planning from a wrong surface.
+        message = "No walkable start node at standing height - floor not scanned yet?";
         return 50;
     }
 
@@ -384,6 +389,10 @@ bool AstarAvoidHolesOctoPlanner::initialize(
     octomap_pub_ = node_->create_publisher<octomap_msgs::msg::Octomap>("graph_octomap", 1);
     penalty_pub_ = node_->create_publisher<octomap_msgs::msg::Octomap>("penalty_octomap", 1);
     pre_fill_penalty_pub_ = node_->create_publisher<octomap_msgs::msg::Octomap>("pre_fill_penalty_octomap", 1);
+    if (!node_->has_parameter(name_ + ".stand_height"))
+        stand_height_ = node_->declare_parameter(name_ + ".stand_height", stand_height_);
+    else
+        node_->get_parameter(name_ + ".stand_height", stand_height_);
     return true;
 }
 
@@ -442,10 +451,21 @@ std::string AstarAvoidHolesOctoPlanner::findNearestNode(
     const std::shared_ptr<mbf_octo_core::GraphData>& graph,
     const octomap::point3d& query)
 {
+    return findNearestNode(graph, query,
+                           -std::numeric_limits<double>::max(),
+                            std::numeric_limits<double>::max());
+}
+
+std::string AstarAvoidHolesOctoPlanner::findNearestNode(
+    const std::shared_ptr<mbf_octo_core::GraphData>& graph,
+    const octomap::point3d& query,
+    double min_z, double max_z)
+{
     std::string best_id;
     double best_dist = std::numeric_limits<double>::max();
     for (const auto& [id, node] : graph->nodes) {
         if (!node.is_walkable) continue;
+        if (node.center.z() < min_z || node.center.z() > max_z) continue;
         double dx = node.center.x() - query.x();
         double dy = node.center.y() - query.y();
         double dz = node.center.z() - query.z();
@@ -453,6 +473,16 @@ std::string AstarAvoidHolesOctoPlanner::findNearestNode(
         if (d < best_dist) { best_dist = d; best_id = id; }
     }
     return best_id;
+}
+
+std::pair<double,double> AstarAvoidHolesOctoPlanner::startZBand(
+    const geometry_msgs::msg::PoseStamped& start) const
+{
+    // Spot's feet height from his REAL pose (TF), independent of the scanned map. He can
+    // only be standing on a surface up to max_step_height above his feet (tolerance for
+    // graph/TF noise) and not more than 1 m below them.
+    const double feet_z = start.pose.position.z - stand_height_;
+    return {feet_z - 1.0, feet_z + mapper_->getMaxStepHeight()};
 }
 
 std::string AstarAvoidHolesOctoPlanner::findNodeInFront(
@@ -474,11 +504,15 @@ std::string AstarAvoidHolesOctoPlanner::findNodeInFront(
     const double min_cos = std::cos(50.0 * M_PI / 180.0);
     // Ignore nodes essentially under the robot; we want the *next* node forward.
     const double min_forward = mapper_->getVoxelSize() * 0.5;
+    // Feet-height band: never snap onto a surface Spot cannot be standing on (e.g. a
+    // platform above him when the floor beneath him is not scanned yet).
+    const auto [z_min, z_max] = startZBand(start);
 
     std::string best_id;
     double best_dist = std::numeric_limits<double>::max();
     for (const auto& [id, node] : graph->nodes) {
         if (!node.is_walkable) continue;
+        if (node.center.z() < z_min || node.center.z() > z_max) continue;
         double dx = node.center.x() - sx;
         double dy = node.center.y() - sy;
         double dxy = std::sqrt(dx * dx + dy * dy);
