@@ -8,6 +8,7 @@
   <license>Apache-2.0</license>
 
   <depend>mbf_abstract_core</depend>
+  <depend>mesh_msgs</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

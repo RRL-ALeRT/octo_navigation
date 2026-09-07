@@ -13,6 +13,7 @@ set(dependencies
   mbf_simple_core
   mbf_octo_core
   mbf_msgs
+  mesh_msgs
   nav_msgs
   octomap
   octomap_msgs
@@ -39,6 +40,7 @@ include_directories(
 )
 
 add_library(mbf_octo_server
+  src/mesh_mapping_server.cpp
   src/octo_controller_execution.cpp
   src/octo_mapping_server.cpp
   src/octo_navigation_server.cpp

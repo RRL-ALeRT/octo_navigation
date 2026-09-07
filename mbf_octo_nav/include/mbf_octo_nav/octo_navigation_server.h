@@ -46,6 +46,7 @@
 #include "octo_planner_execution.h"
 #include "octo_recovery_execution.h"
 #include "octo_mapping_server.h"
+#include "mesh_mapping_server.h"
 
 #include <mbf_msgs/srv/check_path.hpp>
 #include <mbf_msgs/srv/check_pose.hpp>
@@ -55,6 +56,7 @@
 #include <mbf_simple_core/simple_planner.h>
 #include <mbf_simple_core/simple_controller.h>
 #include <mbf_simple_core/simple_recovery.h>
+#include <mbf_octo_core/mesh_planner.h>
 
 #include <pluginlib/class_loader.hpp>
 
@@ -194,6 +196,12 @@ private:
   //! Created in the constructor and injected into every OctoPlanner plugin.
   OctoMappingServer::Ptr mapping_server_;
 
+  //! Mesh mapping server — converts octomap voxels into a low-poly mesh,
+  //! published on /meshmap, plus the Gv/Gt navigation graph exposed via
+  //! mbf_octo_core::MeshMapper. Injected into every MeshPlanner plugin
+  //! (the mesh-planning counterpart of mapping_server_/OctoPlanner).
+  MeshMappingServer::Ptr mesh_mapping_server_;
+
   //! plugin class loader for recovery behaviors plugins
   pluginlib::ClassLoader<mbf_octo_core::OctoRecovery> recovery_plugin_loader_;
   pluginlib::ClassLoader<mbf_simple_core::SimpleRecovery> simple_recovery_plugin_loader_;
@@ -205,6 +213,8 @@ private:
   //! plugin class loader for planner plugins
   pluginlib::ClassLoader<mbf_octo_core::OctoPlanner> planner_plugin_loader_;
   pluginlib::ClassLoader<mbf_simple_core::SimplePlanner> simple_planner_plugin_loader_;
+  //! plugin class loader for mesh planner plugins (operate on MeshMappingServer's Gv/Gt graph)
+  pluginlib::ClassLoader<mbf_octo_core::MeshPlanner> mesh_planner_plugin_loader_;
 
   //! Shared pointer to the common global octo
   //OctoPtr octo_ptr_;

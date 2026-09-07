@@ -4,13 +4,45 @@ move_base_flex:
     robot_frame: 'base_link'
     odom_topic: '/odometry'
     octo_mapping_server:
+      enabled: true
       octomap_topic: '/octomap_binary_local'
       initial_octomap_topic: '/octomap_full'
+    mesh_mapping_server:
+      enabled: true
+      octomap_topic: '/octomap_binary_local'
+      mesh_topic: '/meshmap'
+      costs_topic: '/meshmap_costs'
+      mesh_voxel_size: 0.15
+      max_triangle_edge: 0.5
+      max_ramp_rise: 0.2
+      ramp_smoothing_iterations: 4
+      clearance_scan_max_height: 2.0
+      clearance_scan_max_radius: 1.0
+      clearance_scan_num_dirs: 8
+      collision_check_height_offset: 0.5
+      noise_filter_min_neighbors: 1
+      lattice_bridge_max_dz: 0.3
+      frontier_check_radius: 0.4
+      optimize_period: 3.0
+      min_new_bins_for_optimize: 3000
+      stair_riser_max_height: 0.22
+      slope_smoothing_radius: 0.5
+      stair_max_xy_dist: 0.45
+      stair_min_chain_length: 3
+      wall_cost: 0.8
+      stair_cost: 0.25
+      floor_flat_cost: 0.05
+      edge_cost_boost: 0.15
+      corner_cost_boost: 0.05
+      border_cost_boost: 0.5
+      inflation_radius: 1.2
+      inflation_factor: 1.0
+      inflation_seed_threshold: 0.5
     use_sim_time: false
     force_stop_at_goal: true
     force_stop_on_cancel: true
 
-    planners: ['octo_planner']
+    planners: ['octo_planner', 'mesh_planner']
     octo_planner:
       type: 'astar_octo_planner/AstarOctoPlanner'
       cost_limit: 0.8
@@ -18,6 +50,16 @@ move_base_flex:
       robot_radius: 0.1
       robot_width: 0.1
       robot_height: 0.7
+    mesh_planner:
+      type: 'vector_field_mesh_planner/VectorFieldMeshPlanner'
+      cost_weight: 5.0
+      lethal_cost_threshold: 1.5
+      max_vertex_search_dist: 1.0
+      enable_footprint_check: true
+      robot_height: 0.9
+      robot_width: 0.3
+      collision_margin: 0.05
+      headroom_margin: 0.5
     planner_patience: 10.0
     planner_max_retries: 2
 

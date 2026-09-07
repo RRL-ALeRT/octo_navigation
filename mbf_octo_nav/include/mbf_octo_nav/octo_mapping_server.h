@@ -149,6 +149,14 @@ private:
   double octomap_clamp_min_  = 0.1;
   double octomap_clamp_max_  = 0.95;
 
+  // ---- Enable / disable ------------------------------------------------------
+  // Master switch: if false, initialize() returns immediately after this is
+  // read — no subscriptions, timers, or publishers are ever created. Lets you
+  // fully turn this mapper off from the yaml (e.g. to test MeshMappingServer
+  // in isolation) without touching code. Distinct from enable_octomap_updates_
+  // below, which still allows the one-time full-map bootstrap build.
+  bool enabled_ = true;
+
   // ---- Subscription / build control ----------------------------------------
   std::string octomap_topic_        = "/octomap_binary_local";
   // One-time full-map build source (the complete accumulated map, not the local

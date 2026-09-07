@@ -6,6 +6,7 @@ set(dependencies
   mbf_abstract_core
   octomap
   octomap_msgs
+  mesh_msgs
   visualization_msgs
   geometry_msgs
 )

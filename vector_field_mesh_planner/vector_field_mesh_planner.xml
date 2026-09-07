@@ -1,0 +1,8 @@
+<library path="vector_field_mesh_planner">
+    <class name="vector_field_mesh_planner/VectorFieldMeshPlanner" type="vector_field_mesh_planner::VectorFieldMeshPlanner"
+           base_class_type="mbf_octo_core::MeshPlanner">
+        <description>
+            A cost-weighted potential-field / vector-field planner searching the Gv navigation mesh graph built by MeshMappingServer
+        </description>
+    </class>
+</library>

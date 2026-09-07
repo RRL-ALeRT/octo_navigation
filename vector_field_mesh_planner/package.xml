@@ -1,23 +1,21 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>mbf_octo_nav</name>
+  <name>vector_field_mesh_planner</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>Potential-field / vector-field planner searching MeshMappingServer's Gv/Gt navigation mesh graph</description>
   <maintainer email="m.kirsch@fh-aachen.de">max</maintainer>
   <license>Apache-2.0</license>
 
-    <depend>geometry_msgs</depend>
-    <depend>mbf_abstract_nav</depend>
-    <depend>mbf_simple_core</depend>
-    <depend>mbf_octo_core</depend>
-    <depend>mbf_msgs</depend>
-    <depend>mesh_msgs</depend>
-    <depend>nav_msgs</depend>
-    <depend>pluginlib</depend>
     <depend>rclcpp</depend>
-    <depend>sensor_msgs</depend>
-    <depend>std_srvs</depend>
+    <depend>mbf_octo_core</depend>
+    <depend>mbf_utility</depend>
+    <depend>mbf_msgs</depend>
+    <depend>pluginlib</depend>
+  <depend>mesh_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

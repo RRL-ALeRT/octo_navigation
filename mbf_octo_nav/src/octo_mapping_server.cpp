@@ -85,6 +85,15 @@ void OctoMappingServer::initialize(const std::string & name,
   name_ = name;
   node_ = node;
 
+  enabled_ = node_->declare_parameter(name_ + ".enabled", enabled_);
+  if (!enabled_) {
+    RCLCPP_INFO(node_->get_logger(),
+      "OctoMappingServer (name=%s) disabled via '%s.enabled' — no subscriptions, "
+      "no graph will ever be built.",
+      name_.c_str(), name_.c_str());
+    return;
+  }
+
   // --- Octomap subscription -------------------------------------------------
   octomap_topic_ = node_->declare_parameter(name_ + ".octomap_topic", octomap_topic_);
   octomap_sub_ = node_->create_subscription<octomap_msgs::msg::Octomap>(

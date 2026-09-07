@@ -136,10 +136,14 @@ OctoNavigationServer::OctoNavigationServer(const TFPtr& tf_listener_ptr, const r
   , simple_recovery_plugin_loader_("mbf_simple_core", "mbf_simple_core::SimpleRecovery")
   , simple_controller_plugin_loader_("mbf_simple_core", "mbf_simple_core::SimpleController")
   , simple_planner_plugin_loader_("mbf_simple_core", "mbf_simple_core::SimplePlanner")
+  , mesh_planner_plugin_loader_("mbf_octo_core", "mbf_octo_core::MeshPlanner")
 {
   // Create and initialise the mapping server before any planner plugin is loaded.
   mapping_server_ = std::make_shared<OctoMappingServer>();
   mapping_server_->initialize("octo_mapping_server", node_);
+
+  mesh_mapping_server_ = std::make_shared<MeshMappingServer>();
+  mesh_mapping_server_->initialize("mesh_mapping_server", node_);
 
   // advertise services and current goal topic
   check_pose_cost_srv_ =
@@ -176,7 +180,33 @@ mbf_abstract_nav::AbstractRecoveryExecution::Ptr OctoNavigationServer::newRecove
 
 mbf_abstract_core::AbstractPlanner::Ptr OctoNavigationServer::loadPlannerPlugin(const std::string& planner_type)
 {
-  return loadPlugin<mbf_abstract_core::AbstractPlanner>(planner_type, planner_plugin_loader_, simple_planner_plugin_loader_, "planner", node_->get_logger());
+  mbf_abstract_core::AbstractPlanner::Ptr ptr =
+      loadPlugin<mbf_abstract_core::AbstractPlanner>(planner_type, planner_plugin_loader_, simple_planner_plugin_loader_, "planner", node_->get_logger());
+  if (ptr)
+  {
+    return ptr;
+  }
+
+  // loadPlugin() only checks the octo/simple planner categories; MeshPlanner
+  // is a third category (mesh_octo_core, operates on MeshMappingServer's
+  // Gv/Gt graph instead of the octree graph) checked separately here.
+  const auto available_mesh_planners = mesh_planner_plugin_loader_.getDeclaredClasses();
+  if (std::find(available_mesh_planners.begin(), available_mesh_planners.end(), planner_type) != available_mesh_planners.end())
+  {
+    try
+    {
+      mbf_abstract_core::AbstractPlanner::Ptr mesh_ptr =
+          std::dynamic_pointer_cast<mbf_abstract_core::AbstractPlanner>(mesh_planner_plugin_loader_.createSharedInstance(planner_type));
+      RCLCPP_DEBUG_STREAM(node_->get_logger(), "mbf_octo_core-based mesh planner plugin " << mesh_planner_plugin_loader_.getName(planner_type) << " loaded.");
+      return mesh_ptr;
+    }
+    catch (const pluginlib::PluginlibException& ex)
+    {
+      RCLCPP_ERROR_STREAM(node_->get_logger(), "Error while loading " << planner_type << " as mesh planner: " << ex.what());
+    }
+  }
+
+  return nullptr;
 }
 
 bool OctoNavigationServer::initializePlannerPlugin(const std::string& name,
@@ -192,6 +222,13 @@ bool OctoNavigationServer::initializePlannerPlugin(const std::string& name,
     return octo_planner_ptr->initialize(name, node_, mapping_server_);
   }
 
+  mbf_octo_core::MeshPlanner::Ptr mesh_planner_ptr =
+      std::dynamic_pointer_cast<mbf_octo_core::MeshPlanner>(planner_ptr);
+  if (mesh_planner_ptr)
+  {
+    return mesh_planner_ptr->initialize(name, node_, mesh_mapping_server_);
+  }
+
   mbf_simple_core::SimplePlanner::Ptr simple_planner_ptr =
     std::dynamic_pointer_cast<mbf_simple_core::SimplePlanner>(planner_ptr);
   if (simple_planner_ptr)
@@ -200,7 +237,7 @@ bool OctoNavigationServer::initializePlannerPlugin(const std::string& name,
     return true;
   }
 
-  RCLCPP_ERROR_STREAM(node_->get_logger(), "Failed to initialize plugin " << name << ". Looks like it is neither a Octo planner nor a simple planner.");
+  RCLCPP_ERROR_STREAM(node_->get_logger(), "Failed to initialize plugin " << name << ". Looks like it is neither a Octo planner, a mesh planner, nor a simple planner.");
   return false;
 }
 

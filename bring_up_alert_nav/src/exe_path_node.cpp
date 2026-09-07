@@ -34,9 +34,16 @@ public:
 
     // Subscriber
     goal_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-        "/initialpose",      // RViz 預設 topic
+        "/initialpose",      // RViz 2DEstimate topic
         10,
         std::bind(&ExePath::goalPoseCallback, this, std::placeholders::_1));
+
+    // /goal → GetPath, forced to the mesh (vector field) planner.
+    mesh_planner_name_ = this->declare_parameter("mesh_planner_name", std::string("mesh_planner"));
+    std::string goal_topic = this->declare_parameter("goal_topic", std::string("/goal"));
+    mesh_goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+        goal_topic, 10,
+        std::bind(&ExePath::meshGoalCallback, this, std::placeholders::_1));
 
     // ① Get topic of path（astar_2D_planner's publisher）
     std::string path_topic =
@@ -169,6 +176,48 @@ private:
     }
   }
 
+  void meshGoalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+  {
+    RCLCPP_INFO(get_logger(), "/goal received -> send GetPath (planner=%s)",
+                mesh_planner_name_.c_str());
+
+    if (!mbf_getpath_ac_->wait_for_action_server(std::chrono::seconds(5))) {
+      RCLCPP_ERROR(get_logger(), "GetPath action server not available!");
+      return;
+    }
+
+    auto goal_msg = mbf_msgs::action::GetPath::Goal();
+    goal_msg.target_pose = *msg;
+    goal_msg.planner = mesh_planner_name_;
+
+    auto opts = rclcpp_action::Client<mbf_msgs::action::GetPath>::SendGoalOptions();
+    opts.goal_response_callback =
+        [this](auto handle){
+          if(!handle)
+            RCLCPP_ERROR(get_logger(), "GetPath (mesh) goal rejected");
+          else
+            RCLCPP_INFO (get_logger(), "GetPath (mesh) goal accepted");
+        };
+    opts.result_callback =
+        [this](const rclcpp_action::ClientGoalHandle<mbf_msgs::action::GetPath>::WrappedResult & res){
+          switch(res.code){
+            case rclcpp_action::ResultCode::SUCCEEDED:
+              RCLCPP_INFO (get_logger(), "GetPath (mesh) succeeded");
+              break;
+            case rclcpp_action::ResultCode::ABORTED:
+              RCLCPP_WARN (get_logger(), "GetPath (mesh) aborted: %s", res.result->message.c_str());
+              break;
+            case rclcpp_action::ResultCode::CANCELED:
+              RCLCPP_INFO (get_logger(), "GetPath (mesh) canceled");
+              break;
+            default:
+              RCLCPP_ERROR(get_logger(), "GetPath (mesh) finished with unknown code");
+          }
+        };
+
+    mbf_getpath_ac_->async_send_goal(goal_msg, opts);
+  }
+
   // Service callback
   void onTrigger(const std::shared_ptr<bring_up_alert_nav::srv::StartNav::Request> req,
                  std::shared_ptr<bring_up_alert_nav::srv::StartNav::Response>      res)
@@ -206,7 +255,7 @@ private:
         std::reverse(final_path.poses.begin(), final_path.poses.end());
     }
 
-    // 3. Freshen timestamps 
+    // 3. Freshen timestamps
     rclcpp::Time current_time = this->now();
     final_path.header.stamp = current_time;
     for (auto & pose : final_path.poses) {
@@ -228,7 +277,7 @@ private:
             exe_path_goal_handle_ = handle;
           }
         };
-    
+
     exe_path_ac_->async_send_goal(goal, send_opts);
 
     res->success = true;
@@ -263,6 +312,9 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr goal_sub_;
   rclcpp_action::Client<mbf_msgs::action::MoveBase>::SharedPtr     mbf_movebase_ac_;
   rclcpp_action::Client<mbf_msgs::action::GetPath>::SharedPtr      mbf_getpath_ac_;
+  // /goal -> GetPath forced to the mesh (vector field) planner
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mesh_goal_sub_;
+  std::string mesh_planner_name_;
   // Exe path
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr smooth_sub_;
