@@ -235,7 +235,7 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   node_->get_parameter("octo_controller.backward_walking_enable", backward_walking_enable);
   // When backward walking is disabled, always offset toward the front of the robot.
   double sign = (backward_walking_enable && forward_dot < 0.0) ? -1.0 : +1.0;
-  sign = -0.8;
+  // sign = 0.0; Uncommet this if the path needs ot be generated from the robot center (base_link) instead of the front/back of the robot.
   // Start search XY offset toward the goal side
   double start_search_x = start_world.x + sign * probe_offset * cos_yaw;
   double start_search_y = start_world.y + sign * probe_offset * sin_yaw;
