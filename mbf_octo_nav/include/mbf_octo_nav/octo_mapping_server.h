@@ -220,6 +220,14 @@ private:
   double penalty_spread_radius_       = 0.5;
   double penalty_spread_factor_       = 1.0;
 
+  // Height-difference layer (visualization + data only; never merged into
+  // node_penalty). Computed for every walkable node by sampling the octree
+  // surface inside a vertical cylinder centred on the node.
+  double heightdiff_radius_           = 0.3;   // cylinder base radius [m]
+  double heightdiff_height_           = 0.5;   // cylinder total height [m] (centred on node z)
+  double heightdiff_norm_             = 0.2;   // surface deviation [m] mapping to full weight
+  double heightdiff_penalty_weight_   = 2.0;   // output cost scale (matches wall_penalty_weight_)
+
   // Threading
   int    worker_thread_limit_         = 10;
 
@@ -257,6 +265,9 @@ private:
 
   // ---- Private methods: penalty / costmap computation ---------------------
   void computePendingPenalties(std::shared_ptr<mbf_octo_core::GraphData> & graph);
+  // Fill graph->node_heightdiff_penalty for high-penalty walkable nodes by
+  // sampling octree surface heights on rings around each node. Viz/data only.
+  void computeHeightDiffPenalties(std::shared_ptr<mbf_octo_core::GraphData> & graph);
 
   // ---- Private methods: visualization --------------------------------------
   void publishGraphMarkers();

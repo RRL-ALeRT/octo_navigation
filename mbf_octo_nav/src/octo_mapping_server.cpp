@@ -161,6 +161,12 @@ void OctoMappingServer::initialize(const std::string & name,
   penalty_spread_factor_  = node_->declare_parameter(name_ + ".penalty_spread_factor",  penalty_spread_factor_);
   worker_thread_limit_    = node_->declare_parameter(name_ + ".worker_thread_limit",    worker_thread_limit_);
 
+  // --- Height-difference layer parameters ----------------------------------
+  heightdiff_radius_         = node_->declare_parameter(name_ + ".heightdiff_radius",         heightdiff_radius_);
+  heightdiff_height_         = node_->declare_parameter(name_ + ".heightdiff_height",         heightdiff_height_);
+  heightdiff_norm_           = node_->declare_parameter(name_ + ".heightdiff_norm",           heightdiff_norm_);
+  heightdiff_penalty_weight_ = node_->declare_parameter(name_ + ".heightdiff_penalty_weight", heightdiff_penalty_weight_);
+
   // --- Visualization --------------------------------------------------------
   publish_graph_markers_ = node_->declare_parameter(name_ + ".publish_graph_markers", publish_graph_markers_);
   graph_marker_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
@@ -196,6 +202,7 @@ void OctoMappingServer::initialize(const std::string & name,
         new_graph->penalized_nodes            = current_graph->penalized_nodes;
         new_graph->node_cs_penalty            = current_graph->node_cs_penalty;
         new_graph->node_gb_penalty            = current_graph->node_gb_penalty;
+        new_graph->node_heightdiff_penalty    = current_graph->node_heightdiff_penalty;
         new_graph->penalty_computed_nodes     = current_graph->penalty_computed_nodes;
         new_graph->processed_occupied_keys    = current_graph->processed_occupied_keys;
         new_graph->nodes_needing_adjacency_update = current_graph->nodes_needing_adjacency_update;
@@ -1175,6 +1182,7 @@ size_t OctoMappingServer::revalidateWalkability(
         graph->node_gb_penalty.erase(kv.first);
         graph->node_penalty.erase(kv.first);
         graph->penalized_nodes.erase(kv.first);
+        graph->node_heightdiff_penalty.erase(kv.first);
       }
     }
     total_reclassified += reclassified_this_pass;
@@ -1190,6 +1198,7 @@ size_t OctoMappingServer::revalidateWalkability(
     graph->node_gb_penalty.clear();
     graph->node_penalty.clear();
     graph->penalized_nodes.clear();
+    graph->node_heightdiff_penalty.clear();
     RCLCPP_INFO(node_->get_logger(),
       "Revalidation: %zu nodes reclassified — full penalty cache invalidated",
       total_reclassified);
@@ -1225,6 +1234,7 @@ size_t OctoMappingServer::revalidateWalkability(
         graph->node_cs_penalty.erase(kv.first);
         graph->node_gb_penalty.erase(kv.first);
         graph->node_penalty.erase(kv.first);
+        graph->node_heightdiff_penalty.erase(kv.first);
         ++wall_adjacent_invalidated;
       }
     }
@@ -1240,6 +1250,7 @@ size_t OctoMappingServer::revalidateWalkability(
     graph->node_gb_penalty.clear();
     graph->node_penalty.clear();
     graph->penalized_nodes.clear();
+    graph->node_heightdiff_penalty.clear();
     RCLCPP_INFO(node_->get_logger(),
       "Revalidation detail=3: force-invalidated %zu penalty cache entries", cached_before);
   }
@@ -1260,6 +1271,7 @@ void OctoMappingServer::computePendingPenalties(std::shared_ptr<GraphData> & gra
     graph->node_gb_penalty.clear();
     graph->node_penalty.clear();
     graph->penalized_nodes.clear();
+    graph->node_heightdiff_penalty.clear();
   }
 
   // Collect walkable nodes not yet in the cached costmap
@@ -1273,15 +1285,22 @@ void OctoMappingServer::computePendingPenalties(std::shared_ptr<GraphData> & gra
     RCLCPP_INFO(node_->get_logger(),
       "All %zu walkable nodes have cached penalties — skipping recomputation.",
       graph->penalty_computed_nodes.size());
-    if (publish_graph_markers_ && graph_marker_pub_) {
-      publishGraphMarkers(graph);
-    }
     // Assign max penalty to non-walkable nodes
     for (const auto & kv : graph->nodes) {
       if (!kv.second.is_walkable) {
         graph->node_penalty[kv.first] = wall_penalty_weight_;
         graph->penalized_nodes.insert(kv.first);
       }
+    }
+    computeHeightDiffPenalties(graph);
+    {
+      std::lock_guard<std::mutex> lock(graph_mutex_);
+      if (active_graph_) {
+        active_graph_->node_heightdiff_penalty = graph->node_heightdiff_penalty;
+      }
+    }
+    if (publish_graph_markers_ && graph_marker_pub_) {
+      publishGraphMarkers(graph);
     }
     return;
   }
@@ -1553,15 +1572,19 @@ void OctoMappingServer::computePendingPenalties(std::shared_ptr<GraphData> & gra
     dur_pen, walkable_list.size(), nodes_to_compute.size(),
     edge_count.load(), graph_border_count.load(), penalized_count);
 
+  // Height-difference layer (viz/data only, derived from the final penalties).
+  computeHeightDiffPenalties(graph);
+
   // Persist updated penalties back to active_graph_
   {
     std::lock_guard<std::mutex> lock(graph_mutex_);
     if (active_graph_) {
-      active_graph_->node_penalty           = graph->node_penalty;
-      active_graph_->penalized_nodes        = graph->penalized_nodes;
-      active_graph_->node_cs_penalty        = graph->node_cs_penalty;
-      active_graph_->node_gb_penalty        = graph->node_gb_penalty;
-      active_graph_->penalty_computed_nodes = graph->penalty_computed_nodes;
+      active_graph_->node_penalty            = graph->node_penalty;
+      active_graph_->penalized_nodes         = graph->penalized_nodes;
+      active_graph_->node_cs_penalty         = graph->node_cs_penalty;
+      active_graph_->node_gb_penalty         = graph->node_gb_penalty;
+      active_graph_->node_heightdiff_penalty = graph->node_heightdiff_penalty;
+      active_graph_->penalty_computed_nodes  = graph->penalty_computed_nodes;
     }
   }
   penalties_dirty_ = false;
@@ -1569,6 +1592,118 @@ void OctoMappingServer::computePendingPenalties(std::shared_ptr<GraphData> & gra
   if (publish_graph_markers_ && graph_marker_pub_) {
     publishGraphMarkers(graph);
   }
+}
+
+// =============================================================================
+// Height-difference layer
+// =============================================================================
+//
+// For every walkable node, sample the octree surface inside a vertical cylinder
+// (heightdiff_radius_ base, heightdiff_height_ tall, centred on the node) and
+// record the largest absolute deviation of the local surface from the node's
+// own height, mapped to a [0, heightdiff_penalty_weight_] cost.  Stored in
+// GraphData::node_heightdiff_penalty and published as the "graph_heightdiff"
+// marker namespace.  This layer is informational only: it is NOT merged into
+// node_penalty and does not influence A* planning.
+//
+// Incremental: a node already present in node_heightdiff_penalty is skipped;
+// the cache is invalidated per-node by revalidateWalkability and wholesale on a
+// forced penalty recompute (see computePendingPenalties / reconfigureCallback).
+void OctoMappingServer::computeHeightDiffPenalties(
+  std::shared_ptr<GraphData> & graph)
+{
+  if (!graph || graph->nodes.empty() || !octree_) return;
+
+  // Drop cache entries for nodes that vanished or are no longer walkable.
+  for (auto it = graph->node_heightdiff_penalty.begin();
+       it != graph->node_heightdiff_penalty.end(); ) {
+    auto nit = graph->nodes.find(it->first);
+    if (nit == graph->nodes.end() || !nit->second.is_walkable)
+      it = graph->node_heightdiff_penalty.erase(it);
+    else
+      ++it;
+  }
+
+  // Targets: every walkable node without a cached value.
+  std::vector<std::string> targets;
+  targets.reserve(graph->nodes.size());
+  for (const auto & kv : graph->nodes) {
+    if (!kv.second.is_walkable) continue;
+    if (graph->node_heightdiff_penalty.count(kv.first)) continue;
+    targets.push_back(kv.first);
+  }
+  if (targets.empty()) return;
+
+  auto t0 = std::chrono::steady_clock::now();
+
+  const double radius    = std::max(heightdiff_radius_, active_voxel_size_);
+  const double half_h    = std::max(0.5 * heightdiff_height_, active_voxel_size_);
+  const double spacing   = std::max(active_voxel_size_, 0.05);
+  const double step_z    = spacing;
+  const double norm      = std::max(heightdiff_norm_, 1e-3);
+  const double weight     = heightdiff_penalty_weight_;
+  const int    xy_steps  = std::max(1, static_cast<int>(std::ceil(radius / spacing)));
+
+  std::vector<double> out(targets.size(), 0.0);
+
+  auto worker = [&](size_t start, size_t end) {
+    for (size_t ti = start; ti < end; ++ti) {
+      const GraphNode & node = graph->nodes.at(targets[ti]);
+      const double cx = node.center.x();
+      const double cy = node.center.y();
+      const double cz = node.center.z();
+      double max_dev = 0.0;
+      // Scan every column on a voxel-spaced grid clipped to the cylinder base.
+      for (int gi = -xy_steps; gi <= xy_steps; ++gi) {
+        for (int gj = -xy_steps; gj <= xy_steps; ++gj) {
+          double dx = gi * spacing;
+          double dy = gj * spacing;
+          if (dx * dx + dy * dy > radius * radius) continue;
+          // Highest occupied voxel in this column within the cylinder height.
+          double surf_z = std::numeric_limits<double>::quiet_NaN();
+          for (double z = cz + half_h; z >= cz - half_h; z -= step_z) {
+            octomap::OcTreeNode * nn = octree_->search(cx + dx, cy + dy, z);
+            if (nn && octree_->isNodeOccupied(nn)) { surf_z = z; break; }
+          }
+          if (std::isnan(surf_z)) continue;  // column empty within the cylinder
+          max_dev = std::max(max_dev, std::abs(surf_z - cz));
+        }
+      }
+      out[ti] = weight * std::min(1.0, max_dev / norm);
+    }
+  };
+
+  // Parallel fan-out (same pattern as buildConnectivityGraph / penalties).
+  unsigned int cap = (worker_thread_limit_ > 0)
+    ? static_cast<unsigned int>(worker_thread_limit_)
+    : std::max(2u, std::thread::hardware_concurrency());
+  unsigned int num_threads = std::max(1u,
+    std::min(cap, static_cast<unsigned int>(targets.size())));
+  if (num_threads <= 1) {
+    worker(0, targets.size());
+  } else {
+    size_t chunk = (targets.size() + num_threads - 1) / num_threads;
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
+    for (unsigned int t = 0; t < num_threads; ++t) {
+      size_t s = t * chunk; if (s >= targets.size()) break;
+      size_t e = std::min(s + chunk, targets.size());
+      threads.emplace_back(worker, s, e);
+    }
+    for (auto & th : threads) { if (th.joinable()) th.join(); }
+  }
+
+  size_t nonzero = 0;
+  for (size_t ti = 0; ti < targets.size(); ++ti) {
+    graph->node_heightdiff_penalty[targets[ti]] = out[ti];
+    if (out[ti] > 1e-9) ++nonzero;
+  }
+
+  double dur = std::chrono::duration_cast<std::chrono::duration<double>>(
+    std::chrono::steady_clock::now() - t0).count();
+  RCLCPP_INFO(node_->get_logger(),
+    "Height-diff layer: %.3f s, %zu new nodes (%zu total cached), %zu with non-zero cost",
+    dur, targets.size(), graph->node_heightdiff_penalty.size(), nonzero);
 }
 
 // =============================================================================
@@ -1672,6 +1807,34 @@ void OctoMappingServer::publishGraphMarkers(
     pen_m.colors.push_back(c);
   }
   if (!pen_m.points.empty()) ma.markers.push_back(pen_m);
+
+  // Height-difference marker (sparse: only high-penalty walkable nodes).
+  // Colour green -> red as local surface-height deviation rises.
+  visualization_msgs::msg::Marker hd_m;
+  hd_m.header  = m.header;
+  hd_m.ns      = "graph_heightdiff";
+  hd_m.id      = 4;
+  hd_m.type    = visualization_msgs::msg::Marker::CUBE_LIST;
+  hd_m.action  = visualization_msgs::msg::Marker::ADD;
+  hd_m.scale.x = static_cast<float>(scale);
+  hd_m.scale.y = static_cast<float>(scale);
+  hd_m.scale.z = static_cast<float>(scale);
+  for (const auto & kv : graph->node_heightdiff_penalty) {
+    auto nit = graph->nodes.find(kv.first);
+    if (nit == graph->nodes.end()) continue;
+    geometry_msgs::msg::Point p;
+    p.x = nit->second.center.x();
+    p.y = nit->second.center.y();
+    p.z = nit->second.center.z();
+    hd_m.points.push_back(p);
+    double v = std::min(1.0, kv.second / std::max(1e-6, heightdiff_penalty_weight_));
+    std_msgs::msg::ColorRGBA c;
+    c.r = static_cast<float>(v);
+    c.g = static_cast<float>(1.0 - v);
+    c.b = 0.0f; c.a = 0.95f;
+    hd_m.colors.push_back(c);
+  }
+  if (!hd_m.points.empty()) ma.markers.push_back(hd_m);
 
   graph_marker_pub_->publish(ma);
   RCLCPP_DEBUG(node_->get_logger(),
@@ -1832,6 +1995,14 @@ OctoMappingServer::reconfigureCallback(std::vector<rclcpp::Parameter> parameters
       penalty_spread_radius_ = p.as_double(); penalties_dirty_ = true;
     } else if (pn == name_ + ".penalty_spread_factor") {
       penalty_spread_factor_ = p.as_double(); penalties_dirty_ = true;
+    } else if (pn == name_ + ".heightdiff_radius") {
+      heightdiff_radius_ = p.as_double(); penalties_dirty_ = true;
+    } else if (pn == name_ + ".heightdiff_height") {
+      heightdiff_height_ = p.as_double(); penalties_dirty_ = true;
+    } else if (pn == name_ + ".heightdiff_norm") {
+      heightdiff_norm_ = p.as_double(); penalties_dirty_ = true;
+    } else if (pn == name_ + ".heightdiff_penalty_weight") {
+      heightdiff_penalty_weight_ = p.as_double(); penalties_dirty_ = true;
     } else if (pn == name_ + ".wall_proximity_radius") {
       wall_proximity_radius_ = p.as_double(); penalties_dirty_ = true;
     } else if (pn == name_ + ".wall_proximity_height") {

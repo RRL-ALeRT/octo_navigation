@@ -99,6 +99,12 @@ struct GraphData
   std::unordered_map<std::string, double> node_gb_penalty;
   //! Nodes whose raw penalties (cs + gb) have been computed and cached
   std::unordered_set<std::string> penalty_computed_nodes;
+  //! Height-difference cost per walkable node, from octree surface deviation
+  //! inside a vertical cylinder around the node. Presence of a key also marks
+  //! the node as "already computed" for incremental reuse. Informational /
+  //! visualization layer only — NOT merged into node_penalty, does not affect
+  //! A* planning.
+  std::unordered_map<std::string, double> node_heightdiff_penalty;
 
   // --- Incremental build tracking ---
   //! Occupied voxel keys already processed (avoids re-adding nodes)
