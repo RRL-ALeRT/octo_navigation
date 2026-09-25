@@ -11,6 +11,12 @@ AlertPanel::AlertPanel(QWidget* parent)
 {
   auto v = new QVBoxLayout();
 
+
+  trace_back_btn_ = new QPushButton("Trace Back (Return)");
+  v->addWidget(trace_back_btn_);
+  connect(trace_back_btn_, &QPushButton::clicked, this, &AlertPanel::onTraceBack);
+
+
   toggle_btn_ = new QPushButton("Toggle Octomap Updates");
   v->addWidget(toggle_btn_);
   connect(toggle_btn_, &QPushButton::clicked, this, &AlertPanel::onToggleOctomap);
@@ -280,6 +286,27 @@ void AlertPanel::onExecPath()
       }
     });
 }
+
+
+void AlertPanel::onTraceBack()
+{
+  if (!exec_path_client_) {
+    return;
+  }
+  
+  auto request = std::make_shared<bring_up_alert_nav::srv::StartNav::Request>();
+  request->mode = 3; 
+  
+  exec_path_client_->async_send_request(
+    request,
+    [this](rclcpp::Client<bring_up_alert_nav::srv::StartNav>::SharedFuture future) {
+      auto response = future.get();
+      if (response->success) {
+        RCLCPP_INFO(rcl_node_->get_logger(), "Trace Back started!");
+      }
+    });
+}
+
 
 void AlertPanel::onCancelPath()
 {

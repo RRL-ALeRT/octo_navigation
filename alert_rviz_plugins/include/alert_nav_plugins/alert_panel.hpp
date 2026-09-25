@@ -43,6 +43,7 @@ private Q_SLOTS:
   void onPlanToFrame();
   void onExecPath();
   void onCancelPath();
+  void onTraceBack();
   void updateButtonUI(bool enabled);
 
 private:
@@ -53,6 +54,7 @@ private:
   QDoubleSpinBox* factor_spin_ = nullptr;
   QDoubleSpinBox* radius_spin_ = nullptr;
   QLineEdit* frame_input_ = nullptr;
+  QPushButton* trace_back_btn_;
 
   // rclcpp node and parameter client
   // rclcpp node and parameter client
@@ -64,7 +66,7 @@ private:
   std::string mapping_server_node_name_ = "octo_mapping_server";
   // node and parameter key used for toggling octomap updates in the robot stack
   std::string param_node_name_ = "/move_base_flex";
-  std::string param_key_ = "octo_planner.enable_octomap_updates";
+  std::string param_key_ = "octo_mapping_server.enable_octomap_updates";
   bool octomap_enabled_ = true;
   QTimer* spin_timer_ = nullptr;
   // true if this panel called rclcpp::init()

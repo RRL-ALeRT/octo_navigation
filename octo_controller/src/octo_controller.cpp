@@ -180,12 +180,32 @@ std::tuple<double, double, int> OctoController::purePursuit(
         double x = path[i].pose.position.x;
         double y = path[i].pose.position.y;
         double distance = std::hypot(current_x - x, current_y - y);
-        if (lookahead_distance < distance) {
+        double lx = x - current_x;
+        double ly = y - current_y;
+        bool forward = (lx * std::cos(current_heading) + ly * std::sin(current_heading)) >= 0.0;
+        if (lookahead_distance < distance && forward) {
+
+        RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 500,"found forward point");
             closest_point = {x, y};
             index = i;
             found = true;
             break;
         }
+    }
+
+    if (!found) {
+      for (int i = index; i < static_cast<int>(path.size()); i++) {
+        double x = path[i].pose.position.x;
+        double y = path[i].pose.position.y;
+        double distance = std::hypot(current_x - x, current_y - y);
+        if (lookahead_distance < distance) {
+        RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 500,"NO forward point");
+            closest_point = {x, y};
+            index = i;
+            found = true;
+            break;
+        }
+      }
     }
 
     double v;

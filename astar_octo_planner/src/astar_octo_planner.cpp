@@ -211,12 +211,15 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   }
   RCLCPP_INFO(node_->get_logger(), "Planning on graph with %zu nodes.", planning_graph->size());
 
-  // ---- Direction-aware start search: offset toward the goal side, probe floor ----
-  // Shifts the start search XY toward the goal (front or back) by ~half the body
-  // length so the first path node is already on the correct side of the robot.
-  // Floor Z is estimated by raycasting from center + the directional offset; we keep
-  // the highest hit Z (= nearest surface below) to handle variable body height and
-  // inclined terrain. Works even if no voxels exist directly under the robot yet.
+  // ---- Multi-side start search: probe all sides of the robot, let a reversed ----
+  // ---- goal-to-start A* pick whichever is cheapest -------------------------
+  // The area immediately around the robot may not be scanned yet (e.g. right at
+  // mission start), so instead of snapping a single start point we build a
+  // candidate start point on each side of the robot (front/back/left/right, plus
+  // the center as a fallback) and resolve each to the nearest connected walkable
+  // graph node. The A* search below then runs FROM the goal TOWARD these
+  // candidates: since A* pops nodes in increasing cost order, the first
+  // candidate it reaches is guaranteed to be the cheapest one to the goal.
   const auto& sq = start.pose.orientation;
   double siny_cosp = 2.0 * (sq.w * sq.z + sq.x * sq.y);
   double cosy_cosp = 1.0 - 2.0 * (sq.y * sq.y + sq.z * sq.z);
@@ -226,55 +229,84 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   const double sin_yaw      = std::sin(yaw);
   const double probe_offset = 0.55;  // ~half body length, where feet are typically scanned
 
-  // Is the goal in front of or behind the robot?
-  const double goal_dx     = goal_world.x - start_world.x;
-  const double goal_dy     = goal_world.y - start_world.y;
-  const double forward_dot = goal_dx * cos_yaw + goal_dy * sin_yaw;
-
   bool backward_walking_enable = true;
   node_->get_parameter("octo_controller.backward_walking_enable", backward_walking_enable);
-  // When backward walking is disabled, always offset toward the front of the robot.
-  const double sign = (backward_walking_enable && forward_dot < 0.0) ? -1.0 : +1.0;
 
-  // Start search XY offset toward the goal side
-  double start_search_x = start_world.x + sign * probe_offset * cos_yaw;
-  double start_search_y = start_world.y + sign * probe_offset * sin_yaw;
-  double start_search_z = start_world.z;
+  struct SideOffset { const char* name; double dx; double dy; };
+  std::vector<SideOffset> side_offsets = {
+    { "front", cos_yaw,  sin_yaw },
+    { "left",  -sin_yaw, cos_yaw },
+    { "right",  sin_yaw, -cos_yaw },
+  };
+  if (backward_walking_enable) {
+    // Only offer an approach from directly behind the robot if it can actually
+    // walk backward to reach it.
+    side_offsets.push_back({ "back", -cos_yaw, -sin_yaw });
+  }
 
-  // Probe center + directional offset for floor Z; keep the highest Z (nearest floor)
-  double best_floor_z = -std::numeric_limits<double>::infinity();
-  const std::array<std::pair<double,double>, 2> floor_probes = {{
-    { 0.0,                              0.0                             },
-    { sign * probe_offset * cos_yaw,    sign * probe_offset * sin_yaw  },
-  }};
   const octomap::point3d ray_direction(0.0, 0.0, -1.0);
-  for (const auto& [dx, dy] : floor_probes) {
-    octomap::point3d ray_origin(start_world.x + dx, start_world.y + dy, start_world.z);
+  auto probeFloorZ = [&](double x, double y) -> double {
+    octomap::point3d ray_origin(x, y, start_world.z);
     octomap::point3d ray_hit;
-    bool hit = octree->castRay(ray_origin, ray_direction, ray_hit,
-                                /*ignoreUnknownCells=*/true, /*maxRange=*/5.0);
-    if (hit) {
-      const octomap::point3d hit_center = octree->keyToCoord(octree->coordToKey(ray_hit));
-      if (hit_center.z() > best_floor_z) {
-        best_floor_z   = hit_center.z();
-        start_search_z = hit_center.z();
-      }
+    if (octree->castRay(ray_origin, ray_direction, ray_hit,
+                         /*ignoreUnknownCells=*/true, /*maxRange=*/5.0)) {
+      return octree->keyToCoord(octree->coordToKey(ray_hit)).z();
     }
+    return start_world.z;  // no hit — fall back to robot pose Z
+  };
+
+  struct StartProbe { std::string side; octomap::point3d point; };
+  std::vector<StartProbe> start_probe_points;
+  start_probe_points.push_back({ "center",
+    octomap::point3d(start_world.x, start_world.y, probeFloorZ(start_world.x, start_world.y)) });
+  for (const auto& so : side_offsets) {
+    double x = start_world.x + so.dx * probe_offset;
+    double y = start_world.y + so.dy * probe_offset;
+    start_probe_points.push_back({ so.name, octomap::point3d(x, y, probeFloorZ(x, y)) });
   }
 
-  RCLCPP_INFO(node_->get_logger(),
-    "Start search: goal is %s (dot=%.2f), offset %s by %.2fm -> search XY=(%.3f,%.3f) Z=%.3f",
-    sign > 0 ? "in front" : "behind", forward_dot,
-    sign > 0 ? "forward" : "backward", probe_offset,
-    start_search_x, start_search_y, start_search_z);
-  if (best_floor_z <= -std::numeric_limits<double>::infinity()) {
-    RCLCPP_WARN(node_->get_logger(), "All floor raycasts missed - using robot pose Z as fallback.");
+  auto hasWalkableNeighbor = [&](const std::string& id) -> bool {
+    auto adj_it = planning_graph->adj.find(id);
+    if (adj_it == planning_graph->adj.end()) return false;
+    for (const auto& nb : adj_it->second) {
+      auto nit = planning_graph->nodes.find(nb);
+      if (nit != planning_graph->nodes.end() && nit->second.is_walkable) return true;
+    }
+    return false;
+  };
+
+  // Snap a probe point to the nearest walkable graph node; if that node has no
+  // walkable neighbors (a dead end), fall back to the nearest connected node.
+  auto resolveConnectedNode = [&](const octomap::point3d& p) -> std::string {
+    std::string id = findClosestGraphNode(p, planning_graph);
+    if (!id.empty() && hasWalkableNeighbor(id)) return id;
+    double best = std::numeric_limits<double>::infinity();
+    std::string best_id;
+    for (const auto& kv : planning_graph->nodes) {
+      if (!kv.second.is_walkable || !hasWalkableNeighbor(kv.first)) continue;
+      double dx = kv.second.center.x() - p.x();
+      double dy = kv.second.center.y() - p.y();
+      double dz = kv.second.center.z() - p.z();
+      double d  = dx*dx + dy*dy + dz*dz;
+      if (d < best) { best = d; best_id = kv.first; }
+    }
+    return best_id;
+  };
+
+  std::unordered_set<std::string> candidate_start_ids;
+  {
+    std::ostringstream oss;
+    for (const auto& sp : start_probe_points) {
+      std::string id = resolveConnectedNode(sp.point);
+      if (id.empty()) continue;
+      candidate_start_ids.insert(id);
+      oss << sp.side << "='" << id << "' ";
+    }
+    RCLCPP_INFO(node_->get_logger(), "Start candidates: %s",
+                oss.str().empty() ? "<none>" : oss.str().c_str());
   }
 
-  // ---- Snap start and goal to nearest walkable graph nodes ----
-  std::string start_id = findClosestGraphNode(
-    octomap::point3d(start_search_x, start_search_y, start_search_z), planning_graph);
-
+  // ---- Snap goal to nearest walkable graph node ----
   // Lateral goal offset: retry 1 → left (+90° from robot yaw),
   //                      retry 2 → right (-90° from robot yaw),
   //                      retry 0 (initial) → no offset.
@@ -297,55 +329,6 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   std::string goal_id = findClosestGraphNode(
     octomap::point3d(goal_snap_x, goal_snap_y, goal_world.z), planning_graph);
 
-  // Re-snap start if snapped node has no walkable neighbors
-  if (!start_id.empty()) {
-    auto adj_it = planning_graph->adj.find(start_id);
-    bool has_walkable_nb = false;
-    if (adj_it != planning_graph->adj.end()) {
-      for (const auto& nb : adj_it->second) {
-        auto nit = planning_graph->nodes.find(nb);
-        if (nit != planning_graph->nodes.end() && nit->second.is_walkable) {
-          has_walkable_nb = true;
-          break;
-        }
-      }
-    }
-    if (!has_walkable_nb) {
-      RCLCPP_WARN(node_->get_logger(),
-        "Start node %s has no walkable neighbors — searching for a connected start...",
-        start_id.c_str());
-      octomap::point3d sp(start_world.x, start_world.y, start_world.z);
-      double best = std::numeric_limits<double>::infinity();
-      std::string best_id;
-      for (const auto& kv : planning_graph->nodes) {
-        if (!kv.second.is_walkable) continue;
-        auto a_it = planning_graph->adj.find(kv.first);
-        if (a_it == planning_graph->adj.end()) continue;
-        bool connected = false;
-        for (const auto& nb : a_it->second) {
-          auto nit = planning_graph->nodes.find(nb);
-          if (nit != planning_graph->nodes.end() && nit->second.is_walkable) { connected = true; break; }
-        }
-        if (!connected) continue;
-        double dx = kv.second.center.x() - sp.x();
-        double dy = kv.second.center.y() - sp.y();
-        double dz = kv.second.center.z() - sp.z();
-        double d  = dx*dx + dy*dy + dz*dz;
-        if (d < best) { best = d; best_id = kv.first; }
-      }
-      if (!best_id.empty()) {
-        const auto& cn = planning_graph->nodes.at(best_id);
-        RCLCPP_WARN(node_->get_logger(), "Re-snapped start to %s (%.3f, %.3f, %.3f)",
-          best_id.c_str(), cn.center.x(), cn.center.y(), cn.center.z());
-        start_id = best_id;
-      }
-    }
-  }
-
-  RCLCPP_INFO(node_->get_logger(), "Graph search: start='%s' goal='%s'",
-              start_id.empty() ? "<none>" : start_id.c_str(),
-              goal_id.empty()  ? "<none>" : goal_id.c_str());
-
   // ---- Validate node centers are within map bounds ----
   auto valid_center = [&](const octomap::point3d& c) -> bool {
     if (!std::isfinite(c.x()) || !std::isfinite(c.y()) || !std::isfinite(c.z())) return false;
@@ -355,14 +338,18 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
     return true;
   };
 
-  bool centers_ok = true;
-  if (!start_id.empty()) {
-    const auto& s = planning_graph->nodes.at(start_id);
-    RCLCPP_INFO(node_->get_logger(), "Start node: (%.3f, %.3f, %.3f) walkable=%d clearance=%d",
-                s.center.x(), s.center.y(), s.center.z(), s.is_walkable,
+  // Drop start candidates whose node center falls outside the map bounds.
+  for (auto it = candidate_start_ids.begin(); it != candidate_start_ids.end(); ) {
+    const auto& s = planning_graph->nodes.at(*it);
+    RCLCPP_INFO(node_->get_logger(),
+                "Start candidate %s: (%.3f, %.3f, %.3f) walkable=%d clearance=%d",
+                it->c_str(), s.center.x(), s.center.y(), s.center.z(), s.is_walkable,
                 hasVerticalClearance(s.center, s.size));
-    centers_ok &= valid_center(s.center);
+    if (!valid_center(s.center)) it = candidate_start_ids.erase(it);
+    else ++it;
   }
+
+  bool centers_ok = true;
   if (!goal_id.empty()) {
     const auto& g = planning_graph->nodes.at(goal_id);
     RCLCPP_INFO(node_->get_logger(), "Goal node:  (%.3f, %.3f, %.3f) walkable=%d",
@@ -402,14 +389,18 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
     }
   }
 
-  if (!centers_ok || start_id.empty() || goal_id.empty()) {
+  if (!centers_ok || candidate_start_ids.empty() || goal_id.empty()) {
     RCLCPP_WARN(node_->get_logger(),
       "Invalid or missing start/goal nodes. Aborting plan.");
     message = "Graph path not available or invalid centers";
     return mbf_msgs::action::GetPath::Result::NO_PATH_FOUND;
   }
 
-  // ---- A* search ----
+  // ---- A* search: goal → start ----
+  // Runs from the goal node toward the set of start-side candidates. Since A*
+  // pops nodes in increasing cost order, the first candidate reached is the
+  // one that is cheapest to reach from the goal — i.e. the best side of the
+  // robot to approach from, picked automatically rather than fixed up front.
   const auto& local_nodes        = planning_graph->nodes;
   const auto& local_adj          = planning_graph->adj;
   const auto& local_node_penalty = planning_graph->node_penalty;
@@ -422,14 +413,21 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
   struct PQCmp  { bool operator()(const PQItem& a, const PQItem& b) const { return a.f > b.f; } };
   std::priority_queue<PQItem, std::vector<PQItem>, PQCmp> openq;
 
+  // Admissible heuristic: distance to the nearest start candidate (the search
+  // target now that we run goal → start).
   auto heuristic = [&](const std::string& a) -> double {
     auto ait = local_nodes.find(a);
-    auto git = local_nodes.find(goal_id);
-    if (ait == local_nodes.end() || git == local_nodes.end()) return 0.0;
-    double dx = ait->second.center.x() - git->second.center.x();
-    double dy = ait->second.center.y() - git->second.center.y();
-    double dz = ait->second.center.z() - git->second.center.z();
-    return std::sqrt(dx*dx + dy*dy + dz*dz);
+    if (ait == local_nodes.end()) return 0.0;
+    double best = std::numeric_limits<double>::infinity();
+    for (const auto& tid : candidate_start_ids) {
+      auto tit = local_nodes.find(tid);
+      if (tit == local_nodes.end()) continue;
+      double dx = ait->second.center.x() - tit->second.center.x();
+      double dy = ait->second.center.y() - tit->second.center.y();
+      double dz = ait->second.center.z() - tit->second.center.z();
+      best = std::min(best, std::sqrt(dx*dx + dy*dy + dz*dz));
+    }
+    return std::isfinite(best) ? best : 0.0;
   };
 
   auto getPrecomputedPenalty = [&](const std::string& nid) -> double {
@@ -437,9 +435,10 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
     return it != local_node_penalty.end() ? it->second : 0.0;
   };
 
-  openq.push({start_id, heuristic(start_id), 0.0});
-  gscore[start_id] = 0.0;
+  openq.push({goal_id, heuristic(goal_id), 0.0});
+  gscore[goal_id] = 0.0;
 
+  std::string start_id;  // resolved once the search reaches a start-side candidate
   std::vector<std::string> path_ids;
   auto t_astar_start = std::chrono::steady_clock::now();
   size_t rejected_not_walkable       = 0;
@@ -450,11 +449,13 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
 
   while (!openq.empty()) {
     PQItem cur = openq.top(); openq.pop();
-    if (cur.id == goal_id) {
-      std::string u = goal_id;
+    if (candidate_start_ids.count(cur.id)) {
+      start_id = cur.id;
+      // Walk back through came_from (toward the goal, the search source) —
+      // this already yields the path in start → goal order, no reverse needed.
+      std::string u = cur.id;
       while (came_from.count(u)) { path_ids.push_back(u); u = came_from.at(u); }
-      path_ids.push_back(start_id);
-      std::reverse(path_ids.begin(), path_ids.end());
+      path_ids.push_back(goal_id);
       break;
     }
     if (gscore.count(cur.id) && cur.g > gscore.at(cur.id)) continue;
@@ -499,8 +500,8 @@ uint32_t AstarOctoPlanner::makePlan(const geometry_msgs::msg::PoseStamped& start
 
   if (path_ids.empty()) {
     RCLCPP_WARN(node_->get_logger(),
-      "NO PATH FOUND: start='%s' goal='%s' expanded=%zu",
-      start_id.c_str(), goal_id.c_str(), expanded_set.size());
+      "NO PATH FOUND: goal='%s' start_candidates=%zu expanded=%zu",
+      goal_id.c_str(), candidate_start_ids.size(), expanded_set.size());
     if (rejected_vertical_clearance + rejected_radial_clearance + rejected_edge_collision > 0) {
       RCLCPP_WARN(node_->get_logger(),
         "  -> Collision checks blocked %zu + %zu + %zu edges. "
