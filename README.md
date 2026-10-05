@@ -7,26 +7,39 @@ Real-time 3D Navigation based on OctoMaps for unstructured environments.
 
 ### Dependencies
 
-move base flex:
+| Package | Repository | Branch |
+|---|---|---|
+| Move Base Flex | [METEORITENMAX/move_base_flex](https://github.com/METEORITENMAX/move_base_flex/tree/humble) (fork of [naturerobots/move_base_flex](https://github.com/naturerobots/move_base_flex)) | `humble` |
+| OctoMap Mapping | [RRL-ALeRT/octomap_mapping](https://github.com/RRL-ALeRT/octomap_mapping/tree/feature/global_and_local_mapping) | `feature/global_and_local_mapping` |
 
-Fork: https://github.com/METEORITENMAX/move_base_flex/tree/humble
-
-Originally:
-https://github.com/naturerobots/move_base_flex
-
-octomapping:
-
-https://github.com/RRL-ALeRT/octomap_mapping/tree/feature/global_and_local_mapping
-
-  $ ros2 launch octomap_server octomap_webots_launch.py
+> **Note:** Move Base Flex must be on the `humble` branch of the fork.
 
 ### Building
-Clone:
-  octomap_mapping
-  Move Base Flex
-  octo_navigation
 
-in a `ros2` workspace and `colcon build`
+Clone all repositories into the `src` folder of a ROS 2 workspace, checking out the correct branches:
+
+```bash
+mkdir -p ~/octo_nav_ws/src && cd ~/octo_nav_ws/src
+
+git clone -b humble git@github.com:METEORITENMAX/move_base_flex.git
+git clone -b feature/global_and_local_mapping git@github.com:RRL-ALeRT/octomap_mapping.git
+git clone git@github.com:RRL-ALeRT/octo_navigation.git
+```
+
+If you already cloned Move Base Flex, switch to the `humble` branch:
+
+```bash
+cd ~/octo_nav_ws/src/move_base_flex
+git checkout humble
+```
+
+Build the workspace:
+
+```bash
+cd ~/octo_nav_ws
+colcon build
+source install/setup.bash
+```
 
 
 ## Start
@@ -56,7 +69,7 @@ Click Panels -> Add new Panel -> AlertPanel
 
 ### Send a Goal
 #### RViz2
-Use ` 3DPoseEstimate` arrow to send a goal and click `Exec Path` button.
+Use `2DPoseEstimate` arrow to send a goal and click `Exec Path` button.
 
 #### Terminal
 Type `ros2 action send_goal /move_base_flex/move_base mbf_msgs/action/MoveBase "t<tab>`
