@@ -62,9 +62,30 @@ or
   Note: make sure the config `.yaml` suits your robot. By default `mbf_alert_nav.yaml` is loaded.
 
 
-Add alert_rviz_plugin in Rviz2:
+### RViz2
 
-Click Panels -> Add new Panel -> AlertPanel
+A preconfigured RViz2 config is provided in `alert_rviz_plugins`:
+
+```bash
+rviz2 -d ~/octo_nav_ws/src/octo_navigation/alert_rviz_plugins/rviz2/alert_nav.rviz
+```
+
+Add the `alert_rviz_plugin` panel in RViz2: click **Panels → Add New Panel → AlertPanel**.
+
+#### Important topics
+
+| Display type | Topic | Description |
+|---|---|---|
+| OccupancyGrid (`octomap_rviz_plugins`) | `/octomap_binary_local` | Local OctoMap |
+| OccupancyGrid (`octomap_rviz_plugins`) | `/octomap_binary_full` | Full (global) OctoMap |
+| MarkerArray | `/move_base_flex/graph_nodes` | Planning graph. Namespace `graph_nodes` shows the walkable nodes, `graph_penalty` shows the penalty nodes |
+| Path | `/move_base_flex/body_height/path` | Planned path |
+
+> **Note:** If the `octomap_rviz_plugins/OccupancyGrid` display type is not available in RViz2, install the plugin:
+>
+> ```bash
+> sudo apt install ros-humble-octomap-rviz-plugins
+> ```
 
 
 ### Send a Goal

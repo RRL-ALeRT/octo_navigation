@@ -1,0 +1,1013 @@
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 78
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Status1
+        - /TF1/Tree1
+        - /MarkerArray1
+        - /MarkerArray1/Topic1
+        - /Path1
+        - /OccupancyGrid1
+        - /OccupancyGrid1/Topic1
+      Splitter Ratio: 0.5139535069465637
+    Tree Height: 455
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Tool Properties
+    Expanded:
+      - /2D Goal Pose1
+      - /Publish Point1
+    Name: Tool Properties
+    Splitter Ratio: 0.5886790156364441
+  - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+  - Class: rviz_common/Time
+    Experimental: false
+    Name: Time
+    SyncMode: 0
+    SyncSource: ""
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.5
+      Cell Size: 0.5
+      Class: rviz_default_plugins/Grid
+      Color: 160; 160; 164
+      Enabled: true
+      Line Style:
+        Line Width: 0.029999999329447746
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 10
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Frame Timeout: 15
+      Frames:
+        All Enabled: false
+        KRail_End:
+          Value: false
+        KRail_Start:
+          Value: false
+        Kinect:
+          Value: false
+        Linear_Inspect_KRail:
+          Value: false
+        Omni_Estop_Incline:
+          Value: false
+        Omni_Estop_KRail:
+          Value: false
+        Omni_Inspect_KRail:
+          Value: false
+        Velodyne_Puck:
+          Value: false
+        accelerometer:
+          Value: false
+        base_footprint:
+          Value: false
+        base_link:
+          Value: true
+        bicep_link:
+          Value: false
+        bracelet_link:
+          Value: false
+        camera_link:
+          Value: false
+        cap screw:
+          Value: false
+        cap screw(1):
+          Value: false
+        cap screw(10):
+          Value: false
+        cap screw(11):
+          Value: false
+        cap screw(12):
+          Value: false
+        cap screw(13):
+          Value: false
+        cap screw(14):
+          Value: false
+        cap screw(15):
+          Value: false
+        cap screw(16):
+          Value: false
+        cap screw(17):
+          Value: false
+        cap screw(18):
+          Value: false
+        cap screw(19):
+          Value: false
+        cap screw(2):
+          Value: false
+        cap screw(3):
+          Value: false
+        cap screw(4):
+          Value: false
+        cap screw(5):
+          Value: false
+        cap screw(6):
+          Value: false
+        cap screw(7):
+          Value: false
+        cap screw(8):
+          Value: false
+        cap screw(9):
+          Value: false
+        end_effector_link:
+          Value: false
+        forearm_link:
+          Value: false
+        front:
+          Value: false
+        front left forearm:
+          Value: false
+        front left shoulder:
+          Value: false
+        front left touch sensor:
+          Value: false
+        front left upperarm:
+          Value: false
+        front right forearm:
+          Value: false
+        front right shoulder:
+          Value: false
+        front right touch sensor:
+          Value: false
+        front right upperarm:
+          Value: false
+        gen3_base_link:
+          Value: false
+        gps:
+          Value: false
+        gyro:
+          Value: false
+        inertial unit:
+          Value: false
+        kinect_color:
+          Value: false
+        kinect_range:
+          Value: false
+        kinova_color:
+          Value: false
+        kinova_depth:
+          Value: false
+        left flank camera:
+          Value: false
+        left flank depth:
+          Value: false
+        left head camera:
+          Value: false
+        left head depth:
+          Value: false
+        left middle down led:
+          Value: false
+        left middle up led:
+          Value: false
+        left top led:
+          Value: false
+        left_flank_depth:
+          Value: false
+        left_head_depth:
+          Value: false
+        left_inner_finger:
+          Value: false
+        left_inner_finger_pad:
+          Value: false
+        left_inner_knuckle:
+          Value: false
+        left_outer_finger:
+          Value: false
+        left_outer_knuckle:
+          Value: false
+        map:
+          Value: false
+        map_1m:
+          Value: false
+        map_2m:
+          Value: false
+        odom:
+          Value: true
+        rear camera:
+          Value: false
+        rear depth:
+          Value: false
+        rear left forearm:
+          Value: false
+        rear left shoulder:
+          Value: false
+        rear left touch sensor:
+          Value: false
+        rear left upperarm:
+          Value: false
+        rear right forearm:
+          Value: false
+        rear right shoulder:
+          Value: false
+        rear right touch sensor:
+          Value: false
+        rear right upperarm:
+          Value: false
+        rear_depth:
+          Value: false
+        right bottom led:
+          Value: false
+        right flank camera:
+          Value: false
+        right flank depth:
+          Value: false
+        right head camera:
+          Value: false
+        right head depth:
+          Value: false
+        right middle down led:
+          Value: false
+        right middle up led:
+          Value: false
+        right top led:
+          Value: false
+        right_flank_depth:
+          Value: false
+        right_head_depth:
+          Value: false
+        right_inner_finger:
+          Value: false
+        right_inner_finger_pad:
+          Value: false
+        right_inner_knuckle:
+          Value: false
+        right_outer_finger:
+          Value: false
+        right_outer_knuckle:
+          Value: false
+        robotiq_2f_base_link:
+          Value: false
+        shoulder_link:
+          Value: false
+        solid_0:
+          Value: false
+        solid_1:
+          Value: false
+        solid_2:
+          Value: false
+        solid_3:
+          Value: false
+        spherical_wrist_1_link:
+          Value: false
+        spherical_wrist_2_link:
+          Value: false
+      Marker Scale: 1
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Tree:
+        map:
+          KRail_End:
+            {}
+          KRail_Start:
+            {}
+          Linear_Inspect_KRail:
+            {}
+          Omni_Estop_Incline:
+            {}
+          Omni_Estop_KRail:
+            {}
+          Omni_Inspect_KRail:
+            {}
+          map_1m:
+            {}
+          map_2m:
+            {}
+          odom:
+            base_link:
+              Kinect:
+                kinect_color:
+                  {}
+                kinect_range:
+                  {}
+              Velodyne_Puck:
+                {}
+              accelerometer:
+                {}
+              base_footprint:
+                {}
+              front:
+                cap screw:
+                  {}
+                cap screw(1):
+                  {}
+                cap screw(10):
+                  {}
+                cap screw(11):
+                  {}
+                cap screw(12):
+                  {}
+                cap screw(13):
+                  {}
+                cap screw(14):
+                  {}
+                cap screw(15):
+                  {}
+                cap screw(16):
+                  {}
+                cap screw(17):
+                  {}
+                cap screw(18):
+                  {}
+                cap screw(19):
+                  {}
+                cap screw(2):
+                  {}
+                cap screw(3):
+                  {}
+                cap screw(4):
+                  {}
+                cap screw(5):
+                  {}
+                cap screw(6):
+                  {}
+                cap screw(7):
+                  {}
+                cap screw(8):
+                  {}
+                cap screw(9):
+                  {}
+              front left shoulder:
+                front left upperarm:
+                  front left forearm:
+                    front left touch sensor:
+                      {}
+                  solid_3:
+                    {}
+              front right shoulder:
+                front right upperarm:
+                  front right forearm:
+                    front right touch sensor:
+                      {}
+                  solid_2:
+                    {}
+              gen3_base_link:
+                shoulder_link:
+                  bicep_link:
+                    forearm_link:
+                      spherical_wrist_1_link:
+                        spherical_wrist_2_link:
+                          bracelet_link:
+                            end_effector_link:
+                              camera_link:
+                                {}
+                              kinova_color:
+                                {}
+                              kinova_depth:
+                                {}
+                              robotiq_2f_base_link:
+                                left_inner_knuckle:
+                                  {}
+                                left_outer_knuckle:
+                                  left_outer_finger:
+                                    left_inner_finger:
+                                      left_inner_finger_pad:
+                                        {}
+                                right_inner_knuckle:
+                                  {}
+                                right_outer_knuckle:
+                                  right_outer_finger:
+                                    right_inner_finger:
+                                      right_inner_finger_pad:
+                                        {}
+              gps:
+                {}
+              gyro:
+                {}
+              inertial unit:
+                {}
+              left flank camera:
+                {}
+              left flank depth:
+                left_flank_depth:
+                  {}
+              left head camera:
+                {}
+              left head depth:
+                left_head_depth:
+                  {}
+              left middle down led:
+                {}
+              left middle up led:
+                {}
+              left top led:
+                {}
+              rear camera:
+                {}
+              rear depth:
+                rear_depth:
+                  {}
+              rear left shoulder:
+                rear left upperarm:
+                  rear left forearm:
+                    rear left touch sensor:
+                      {}
+                  solid_1:
+                    {}
+              rear right shoulder:
+                rear right upperarm:
+                  rear right forearm:
+                    rear right touch sensor:
+                      {}
+                  solid_0:
+                    {}
+              right bottom led:
+                {}
+              right flank camera:
+                {}
+              right flank depth:
+                right_flank_depth:
+                  {}
+              right head camera:
+                {}
+              right head depth:
+                right_head_depth:
+                  {}
+              right middle down led:
+                {}
+              right middle up led:
+                {}
+              right top led:
+                {}
+      Update Interval: 0
+      Value: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description File: ""
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: true
+      Links:
+        All Links Enabled: true
+        Expand Joint Details: false
+        Expand Link Details: false
+        Expand Tree: false
+        Kinect:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        Link Tree Style: Links in Alphabetic Order
+        Velodyne_Puck:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        accelerometer:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        bicep_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        bracelet_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        camera_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(1):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(10):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(11):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(12):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(13):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(14):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(15):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(16):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(17):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(18):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(19):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(2):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(3):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(4):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(5):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(6):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(7):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(8):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        cap screw(9):
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        end_effector_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        forearm_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        front:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        front left forearm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        front left shoulder:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        front left touch sensor:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        front left upperarm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        front right forearm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        front right shoulder:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        front right touch sensor:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        front right upperarm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        gen3_base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        gps:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        gyro:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        inertial unit:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        kinect_color:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        kinect_range:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        kinova_color:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        kinova_depth:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        left flank camera:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        left flank depth:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        left head camera:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        left head depth:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        left middle down led:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        left middle up led:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        left top led:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        left_inner_finger:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        left_inner_finger_pad:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        left_inner_knuckle:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        left_outer_finger:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        left_outer_knuckle:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rear camera:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        rear depth:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        rear left forearm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rear left shoulder:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rear left touch sensor:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        rear left upperarm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rear right forearm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rear right shoulder:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rear right touch sensor:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        rear right upperarm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        right bottom led:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        right flank camera:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        right flank depth:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        right head camera:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        right head depth:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        right middle down led:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        right middle up led:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        right top led:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        right_inner_finger:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        right_inner_finger_pad:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        right_inner_knuckle:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        right_outer_finger:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        right_outer_knuckle:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        robotiq_2f_base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        shoulder_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        solid_0:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        solid_1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        solid_2:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        solid_3:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        spherical_wrist_1_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        spherical_wrist_2_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+      Mass Properties:
+        Inertia: false
+        Mass: false
+      Name: RobotModel
+      TF Prefix: ""
+      Update Interval: 0
+      Value: true
+      Visual Enabled: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MarkerArray
+      Namespaces:
+        graph_nodes: true
+        graph_penalty: true
+        graph_start_goal: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /move_base_flex/graph_nodes
+      Value: true
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 97; 53; 131
+      Enabled: true
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
+      Line Style: Billboards
+      Line Width: 0.30000001192092896
+      Name: Path
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /move_base_flex/body_height/path
+      Value: true
+    - Class: octomap_rviz_plugins/OccupancyGrid
+      Enabled: true
+      Max. Height Display: 3.4028234663852886e+38
+      Max. Octree Depth: 16
+      Min. Height Display: -3.4028234663852886e+38
+      Name: OccupancyGrid
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /octomap_binary_local
+      Value: true
+      Voxel Alpha: 1
+      Voxel Coloring: Z-Axis
+      Voxel Rendering: Occupied Voxels
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+    - Class: rviz_default_plugins/SetInitialPose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /goal_pose
+    - Class: rviz_default_plugins/PublishPoint
+      Single click: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /clicked_point
+    - Class: rviz_mesh_tools_plugins/MeshGoal
+      Switch Bottom/Top: false
+      Topic: goal
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/ThirdPersonFollower
+      Distance: 9.867076873779297
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: -0.02054429054260254
+        Y: -0.9963946342468262
+        Z: -0.6471543908119202
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 0.7547973990440369
+      Target Frame: body
+      Value: ThirdPersonFollower (rviz_default_plugins)
+      Yaw: 3.327676296234131
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 752
+  Hide Left Dock: false
+  Hide Right Dock: true
+  QMainWindow State: 000000ff00000000fd00000004000000000000025100000252fc0200000008fb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003d00000252000000c900fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261000000010000010f0000035afc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000003d0000035a000000a400fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e100000197000000030000056b0000003efc0100000002fb0000000800540069006d006501000000000000056b000002fb00fffffffb0000000800540069006d00650100000000000004500000000000000000000003140000025200000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Selection:
+    collapsed: false
+  Time:
+    collapsed: false
+  Tool Properties:
+    collapsed: false
+  Views:
+    collapsed: true
+  Width: 1387
+  X: 213
+  Y: 97
