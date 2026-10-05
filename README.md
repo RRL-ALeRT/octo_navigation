@@ -11,26 +11,36 @@ Real-time 3D Navigation based on OctoMaps for unstructured environments.
 |---|---|---|
 | Move Base Flex | [METEORITENMAX/move_base_flex](https://github.com/METEORITENMAX/move_base_flex/tree/humble) (fork of [naturerobots/move_base_flex](https://github.com/naturerobots/move_base_flex)) | `humble` |
 | OctoMap Mapping | [RRL-ALeRT/octomap_mapping](https://github.com/RRL-ALeRT/octomap_mapping/tree/feature/global_and_local_mapping) | `feature/global_and_local_mapping` |
+| ALeRT Messages | [RRL-ALeRT/alert_msgs](https://github.com/RRL-ALeRT/alert_msgs) | `main` |
 
 > **Note:** Move Base Flex must be on the `humble` branch of the fork.
 
+All source dependencies are listed in [`alert_nav.repos`](alert_nav.repos) with their correct branches.
+
 ### Building
 
-Clone all repositories into the `src` folder of a ROS 2 workspace, checking out the correct branches:
+Install the tools (once):
+
+```bash
+sudo apt install python3-vcstool python3-rosdep
+sudo rosdep init   # skip if already initialized
+rosdep update
+```
+
+Clone this repository into the `src` folder of a ROS 2 workspace and import the dependencies with `vcs`:
 
 ```bash
 mkdir -p ~/octo_nav_ws/src && cd ~/octo_nav_ws/src
 
-git clone -b humble git@github.com:METEORITENMAX/move_base_flex.git
-git clone -b feature/global_and_local_mapping git@github.com:RRL-ALeRT/octomap_mapping.git
 git clone git@github.com:RRL-ALeRT/octo_navigation.git
+vcs import < octo_navigation/alert_nav.repos
 ```
 
-If you already cloned Move Base Flex, switch to the `humble` branch:
+Install the system dependencies with `rosdep`:
 
 ```bash
-cd ~/octo_nav_ws/src/move_base_flex
-git checkout humble
+cd ~/octo_nav_ws
+rosdep install --from-paths src --ignore-src -r -y --rosdistro humble
 ```
 
 Build the workspace:
@@ -39,6 +49,14 @@ Build the workspace:
 cd ~/octo_nav_ws
 colcon build
 source install/setup.bash
+```
+
+To update all dependency repositories later:
+
+```bash
+cd ~/octo_nav_ws/src
+vcs import < octo_navigation/alert_nav.repos
+vcs pull
 ```
 
 

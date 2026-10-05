@@ -1,0 +1,13 @@
+repositories:
+  alert_msgs:
+    type: git
+    url: git@github.com:RRL-ALeRT/alert_msgs.git
+    version: main
+  move_base_flex:
+    type: git
+    url: git@github.com:METEORITENMAX/move_base_flex.git
+    version: humble
+  octomap_mapping:
+    type: git
+    url: git@github.com:RRL-ALeRT/octomap_mapping.git
+    version: feature/global_and_local_mapping
